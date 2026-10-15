@@ -43,10 +43,18 @@ public:
     double grade() const { return course_.GradeAt(distance_); }
     double climbed() const { return climbed_; }
     double elapsed() const { return elapsed_; }  // s, moving time
+    double work() const { return work_; }        // J at the pedals
+    double calories() const;                     // kcal burned
+    int averagePower() const;
+    int averageCadence() const;
+    int averageHeartRate() const;                // 0 without one
+    int maxPower() const { return maxPower_; }
     bool paused() const { return paused_; }
     bool finished() const { return finished_; }
 
 private:
+    double SimPower() const;
+
     Course course_;
     Mode mode_;
     double mass_;
@@ -56,6 +64,8 @@ private:
     double cadence_ = 0.0;
     int heartRate_ = -1;
     double speed_ = 0.0, distance_ = 0.0, climbed_ = 0.0, elapsed_ = 0.0;
+    double work_ = 0.0, cadenceSum_ = 0.0, heartSum_ = 0.0, heartTime_ = 0.0;
+    int maxPower_ = 0;
     double simTarget_ = 0.0;
     bool paused_ = false, finished_ = false;
 };
