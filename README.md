@@ -23,6 +23,8 @@ Distance comes from your real power, so climbs take as long as they would outsid
 
 There are three modes. Sim uses virtual gears and makes climbs harder. ERG holds a target power. Resistance holds a fixed level.
 
+When the ride ends, a summary shows your time, distance, climbing, power and calories. Upload it to Strava from there. The first upload signs you in through the browser.
+
 | Key | Zwift Ride | Action |
 | --- | --- | --- |
 | ↑ → | Right shifters | Harder: gear up, +5 W or +5 % |
@@ -33,6 +35,7 @@ There are three modes. Sim uses virtual gears and makes climbs harder. ERG holds
 | R | Hold A | New course, in the first 100 m |
 | D | B | Devices, from the setup screen |
 | Esc twice | Hold B | End the ride |
+| U | Y | Upload to Strava, on the summary |
 | F11 | | Full screen |
 
 On the setup screen, the D-pad picks a setting, the shifters change it and A starts.
@@ -46,3 +49,9 @@ Options such as `--km 30 --gain 1000 --max-grade 10 --loop --mode erg --erg 200 
 ## Build from source
 
 Install Visual Studio 2022 with the C++ workload and the Windows 11 SDK, then run `build.bat`.
+
+Strava uploads need a Strava API app. Create one at [strava.com/settings/api](https://www.strava.com/settings/api) with `localhost` as the callback domain. Then build once with its ID and secret, which are remembered:
+
+```
+build.bat -DSTRAVA_CLIENT_ID=12345 -DSTRAVA_CLIENT_SECRET=your-secret
+```

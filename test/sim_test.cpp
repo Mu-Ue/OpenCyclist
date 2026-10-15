@@ -1,11 +1,13 @@
 // Checks the course generator and the physics. Run build\sim_test.exe; it prints failures and exits non-zero.
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 #include "config.h"
 #include "sim/course.h"
 #include "sim/physics.h"
 #include "sim/ride.h"
+#include "sim/tcx.h"
 
 static int failures = 0;
 
@@ -62,6 +64,23 @@ int main() {
     while (!ride.finished() && ride.elapsed() < 6 * 3600) ride.Tick(kTickMs / 1000.0);
     const double hours = ride.elapsed() / 3600;
     if (!ride.finished() || std::abs(ride.climbed() - ride.course().Gain()) > 1) ++failures, std::printf("FAIL ride\n");
+    // A steady 250 W over the ride's time is the work done, and about 1 kcal per kJ.
+    const double kj = 250 * ride.elapsed() / 1000;
+    if (std::abs(ride.work() / 1000 - kj) > 1 || ride.averagePower() != 250 || std::abs(ride.calories() - kj) > kj * 0.01)
+        ++failures, std::printf("FAIL calories %.0f kcal for %.0f kJ\n", ride.calories(), kj);
+
+    // A ride log as TCX: one trackpoint a second from the start, with the calories of the work done.
+    const std::string tcx = RideToTcx(
+        "# km=1.0 gain=0 max_grade=10 loop=0 seed=1 start=2026-12-31T23:59:59Z\n"
+        "time_s,distance_m,elevation_m,grade_pct,power_w,cadence_rpm,speed_kmh,mode,gear,target,heart_rate_bpm\n"
+        "1,5.0,100.0,0.0,1004,90,18.0,erg,10,200,0\n"
+        "2,10.0,100.1,0.0,1004,91,18.0,erg,10,200,141\n");
+    const bool tcxOk = tcx.find("<Id>2026-12-31T23:59:59Z</Id>") != std::string::npos &&
+                       tcx.find("<Time>2027-01-01T00:00:01Z</Time>") != std::string::npos &&
+                       tcx.find("<Calories>2</Calories>") != std::string::npos &&
+                       tcx.find("<HeartRateBpm><Value>141</Value>") != std::string::npos &&
+                       tcx.find("<HeartRateBpm><Value>0") == std::string::npos && RideToTcx("time_s\n").empty();
+    if (!tcxOk) ++failures, std::printf("FAIL tcx\n%s\n", tcx.c_str());
 
     std::printf("%d courses, 250 W: %.1f km/h flat, %.1f km/h at 8%%, 30 km and %.0f m up in %d:%02d. %s\n", courses,
                 flat, climb, ride.climbed(), int(hours), int(hours * 60) % 60, failures ? "FAILED" : "OK");

@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <winrt/base.h>
 
@@ -33,14 +34,14 @@ struct SetupView {
     std::span<const SetupRow> rows;
     int selected = 0;
     const Course* course = nullptr;
-    std::wstring_view summary;  // under the course preview
+    std::span<const std::wstring> stats;  // under the course preview, such as its length and gain
     std::span<const DeviceInfo> devices;
 };
 
 // Where the setup screen's parts are, in DIPs, for mouse hits.
 struct SetupLayout {
     static constexpr size_t kMaxRows = 10;
-    D2D1_RECT_F rows[kMaxRows]{};
+    D2D1_RECT_F panel{}, rows[kMaxRows]{};
     D2D1_RECT_F preview{}, devices{}, reroll{}, start{};
     float valueLeft(size_t row) const { return (rows[row].left + rows[row].right) / 2; }  // values sit on the right half
 };
@@ -58,6 +59,7 @@ struct DevicesView {
     std::span<const NearbyRow> nearby;
     int focus = 0;                // the cards, then the nearby rows
     std::wstring_view bluetooth;  // the radio's state
+    Tone radio = Tone::Waiting;
     std::wstring_view action;     // a button to fix the radio, such as "Turn on", or empty
     std::wstring_view footer;
     std::wstring_view refresh = L"Refresh";  // the button, which shows a search under way
@@ -74,6 +76,23 @@ struct DevicesLayout {
 
 DevicesLayout LayoutDevices(D2D1_SIZE_F size, size_t nearby);
 
+// What the summary screen after a ride shows.
+struct SummaryView {
+    const Ride* ride = nullptr;
+    std::wstring_view title, date;
+    std::wstring_view strava;      // how the upload is going
+    Tone stravaTone = Tone::Waiting;
+    std::wstring_view upload;      // the Strava button, hidden when empty
+    bool uploadEnabled = true;
+    bool signOut = false;          // shows a button to sign out of Strava
+};
+
+struct SummaryLayout {
+    D2D1_RECT_F done{}, upload{}, signOut{};
+};
+
+SummaryLayout LayoutSummary(D2D1_SIZE_F size);
+
 // Draws the screens into any Direct2D target: a window, or offscreen for a snapshot.
 class Renderer {
 public:
@@ -83,25 +102,48 @@ public:
     void Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_view status);
     void DrawSetup(ID2D1RenderTarget* target, const SetupView& view);
     void DrawDevices(ID2D1RenderTarget* target, const DevicesView& view);
+    void DrawSummary(ID2D1RenderTarget* target, const SummaryView& view);
 
 private:
+    enum class Button { Primary, Secondary, Strava };
+
     float Prepare(ID2D1RenderTarget* target);
-    void DrawMetric(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view label, std::wstring_view value,
-                    std::wstring_view unit, float scale);
+    void DrawHeader(ID2D1RenderTarget* target, std::wstring_view title, std::wstring_view hint);
+    void DrawCard(ID2D1RenderTarget* target, D2D1_RECT_F box, bool focused = false);
+    void DrawStat(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view label, std::wstring_view value,
+                  std::wstring_view unit, float valueSize, ID2D1Brush* valueBrush);
     void DrawProfile(ID2D1RenderTarget* target, const Course& course, double from, double to, double position,
-                     D2D1_RECT_F box, double minSpan);
-    void DrawButton(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view text, bool primary,
-                    IDWriteTextFormat* format);
+                     D2D1_RECT_F box, double minSpan, bool graded);
+    void DrawButton(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view text, Button kind,
+                    IDWriteTextFormat* format, bool enabled = true);
+    void DrawPill(ID2D1RenderTarget* target, D2D1_POINT_2F center, std::wstring_view text, ID2D1Brush* brush);
     void DrawDot(ID2D1RenderTarget* target, D2D1_POINT_2F center, Tone tone);
-    ID2D1Brush* TextBrush(Tone tone) const;
+    ID2D1SolidColorBrush* ToneBrush(Tone tone) const;
+    ID2D1SolidColorBrush* GradeBrush(double grade) const;
     void DrawLabel(ID2D1RenderTarget* target, std::wstring_view text, IDWriteTextFormat* format, D2D1_RECT_F box,
                   ID2D1Brush* brush, DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING);
+    float TextWidth(std::wstring_view text, IDWriteTextFormat* format);
 
     winrt::com_ptr<IDWriteFactory> dwrite_;
+    winrt::com_ptr<ID2D1Factory> factory_;
+    std::wstring textFont_, numberFont_;
+    winrt::com_ptr<IDWriteTypography> tabular_;  // digits of one width, so live numbers don't jiggle
     // Text sizes follow the window size; the formats are remade when it changes.
     float scale_ = 0.0f;
-    winrt::com_ptr<IDWriteTextFormat> value_, label_, small_, row_, title_;
+    winrt::com_ptr<IDWriteTextFormat> label_, small_, row_, title_, heading_, button_;
     // Brushes belong to one target; they're remade when the target changes. Holding it keeps its address unique.
     winrt::com_ptr<ID2D1RenderTarget> brushTarget_;
-    winrt::com_ptr<ID2D1SolidColorBrush> background_, panel_, text_, muted_, accent_, good_, track_, ridden_;
+    winrt::com_ptr<ID2D1SolidColorBrush> background_, surface_, raised_, border_, text_, muted_, faint_, accent_, accentText_,
+        good_, warn_, grades_[6];
+    winrt::com_ptr<ID2D1LinearGradientBrush> backdrop_, rideFill_, trackFill_, fade_;
+    // The elevations of the last profile drawn of a whole course, which stays put while the rider moves.
+    struct ProfileCache {
+        CourseParams params;
+        size_t samples = 0;
+        double from = 0, to = 0;
+        winrt::com_ptr<ID2D1PathGeometry> fill, line;
+        float width = 0, height = 0;
+    } cache_[2];
+    int nextCache_ = 0;
+    std::vector<float> heights_;  // reused between frames
 };

@@ -20,6 +20,7 @@
 #include "ble/heart_rate.h"
 #include "ble/zwift_ride.h"
 #include "config.h"
+#include "net/strava.h"
 #include "sim/course.h"
 #include "sim/ride.h"
 #include "ui/renderer.h"
@@ -73,6 +74,11 @@ private:
     void EndRide();
     std::wstring Status() const;
 
+    // The summary screen after a ride.
+    void CloseSummary();
+    void UploadOrView();
+    void OnSummaryClick(D2D1_POINT_2F p);
+
     // The devices screen.
     void ShowDevices();
     void ShowCourse();
@@ -98,6 +104,7 @@ private:
     bool Held(uint32_t button, ULONGLONG now);
     void OnTick();
 
+    void UpdateTimer();
     void Paint();
     void ToggleFullscreen();
     D2D1_SIZE_F Size() const;
@@ -119,10 +126,13 @@ private:
     int wheel_ = 0;  // wheel delta not yet turned into steps, for touchpads
 
     Course course_;  // on the setup screen, and the one being ridden
-    std::wstring summary_;
+    std::wstring stats_[3];  // the course's length, gain and rough time
     int selected_ = 0;
     std::unique_ptr<Ride> ride_;  // null on the setup and devices screens
     ULONGLONG escAt_ = 0;
+    std::unique_ptr<Ride> done_;  // the ride just ended, which the summary screen shows when not null
+    std::wstring doneDate_, donePath_;
+    std::unique_ptr<Strava> strava_;
 
     bool devices_ = false;  // the devices screen shows instead of the setup screen
     std::vector<ble::Bluetooth::Device> nearby_;  // found nearby and not in use
@@ -149,7 +159,10 @@ private:
     } holds_[2] = {{ble::button::kA}, {ble::button::kB}};
     ULONGLONG lastTick_ = 0;
     FILE* log_ = nullptr;
+    std::wstring logPath_;  // the ride's log, once it has a row
     double logClock_ = 0.0;
+    bool timer_ = false;   // ticking, while something on screen moves by itself
+    bool closed_ = false;
 };
 
 int App::Run(HINSTANCE instance) {
@@ -190,18 +203,21 @@ int App::Run(HINSTANCE instance) {
 
     if (!settings_.course.seed) settings_.course.seed = RandomSeed();
     MakeCourse();
+    // Start on the devices screen. Remembered devices connect by themselves, and once they all have, the
+    // course screen follows. The window shows first, so Bluetooth starting up doesn't hold up the first frame.
+    devices_ = true;
+    ShowWindow(hwnd_, SW_SHOWDEFAULT);
+    UpdateWindow(hwnd_);
     const SavedDevice* saved = settings_.devices;
-    bluetooth_ = std::make_unique<ble::Bluetooth>(hwnd_);
     trainer_ = std::make_unique<ble::Trainer>(hwnd_, saved[0].address, saved[0].name);
     controllers_ = std::make_unique<ble::Controllers>(hwnd_, saved[1].address, saved[1].name);
     monitor_ = std::make_unique<ble::HeartRateMonitor>(hwnd_, saved[2].address, saved[2].name);
-    // Start on the devices screen. Remembered devices connect by themselves, and once they all have, the
-    // course screen follows.
+    bluetooth_ = std::make_unique<ble::Bluetooth>(hwnd_);
+    strava_ = std::make_unique<Strava>(hwnd_);
     ShowDevices();
     autoContinue_ = std::any_of(saved, saved + ble::kRoleCount, [](const SavedDevice& d) { return d.address != 0; });
     lastTick_ = GetTickCount64();
-    SetTimer(hwnd_, kTimer, kTickMs, nullptr);
-    ShowWindow(hwnd_, SW_SHOWDEFAULT);
+    UpdateTimer();
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -221,22 +237,33 @@ LRESULT CALLBACK App::Proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
     // After shutting down for a Windows sign-out, Bluetooth messages may still be queued.
-    if (!trainer_ && msg >= WM_APP && msg <= ble::WM_BLE_LAST) return 0;
+    if (closed_ && msg >= WM_APP && msg <= WM_STRAVA) return 0;
     switch (msg) {
     case WM_TIMER:
         OnTick();
+        UpdateTimer();
         return 0;
-    case ble::WM_TRAINER_DATA:
+    case ble::WM_TRAINER_DATA: {
+        const int power = power_;
+        const double cadence = cadence_;
         if (wParam & ble::kHasPower) power_ = LOWORD(lParam);
         if (wParam & ble::kHasCadence) cadence_ = HIWORD(lParam) / 2.0;
         if (ride_) ride_->OnPower(power_), ride_->OnCadence(cadence_);
+        // A ride redraws on its tick. Elsewhere the numbers show on the devices, when they change.
+        else if (!done_ && (power != power_ || cadence != cadence_)) Redraw();
         return 0;
+    }
     case ble::WM_HEART_RATE:
+        if (!ride_ && !done_ && bpm_ != static_cast<int>(wParam)) Redraw();
         bpm_ = static_cast<int>(wParam);
         if (ride_ && ride_->heartRate() >= 0) ride_->OnHeartRate(bpm_);
         return 0;
+    case WM_STRAVA:
+        if (done_) Redraw();
+        return 0;
     case ble::WM_LINK_STATE:
         if (wParam < ble::kRoleCount) OnLinkState(static_cast<ble::Role>(wParam), static_cast<ble::Link::State>(lParam));
+        UpdateTimer();
         return 0;
     case ble::WM_RADIO_STATE:
         radio_ = static_cast<ble::Bluetooth::State>(wParam);
@@ -250,9 +277,11 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     case ble::WM_RIDE_BUTTONS:
         OnButtons(static_cast<uint32_t>(lParam));
+        UpdateTimer();
         return 0;
     case WM_KEYDOWN:
         OnKey(wParam);
+        UpdateTimer();
         return 0;
     case WM_SYSKEYDOWN:
         if (wParam == VK_RETURN) {  // Alt+Enter
@@ -262,6 +291,7 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     case WM_LBUTTONDOWN:
         OnClick(ToDips({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}));
+        UpdateTimer();
         return 0;
     case WM_MOUSEWHEEL: {
         POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -392,11 +422,14 @@ void App::Summarize() {
                           ? settings_.ergW
                           : static_cast<int>(std::lround(settings_.riderKg * 2.5 / 5)) * 5;
     const int t = static_cast<int>(EstimateTime(course_, settings_.riderKg + settings_.bikeKg, watts));
-    wchar_t buf[128];
-    const int n = swprintf_s(buf, L"%.1f km · %.0f m up", course_.Length() / 1000, course_.Gain());
-    if (t > 0 && n > 0)
-        swprintf_s(buf + n, std::size(buf) - n, L" · about %d:%02d at %d W", t / 3600, t / 60 % 60, watts);
-    summary_ = buf;
+    wchar_t buf[64];
+    swprintf_s(buf, L"%.1f km", course_.Length() / 1000);
+    stats_[0] = buf;
+    swprintf_s(buf, L"%.0f m up", course_.Gain());
+    stats_[1] = buf;
+    if (t > 0) swprintf_s(buf, L"About %d:%02d at %d W", t / 3600, t / 60 % 60, watts);
+    else swprintf_s(buf, L"Too steep for %d W", watts);
+    stats_[2] = buf;
 }
 
 void App::Reroll() {
@@ -428,21 +461,58 @@ void App::Start() {
 // A fresh course straight away, for a ride that has only just started.
 void App::NewRide() {
     CloseLog();
+    logPath_.clear();
     KeepRideSettings();
     settings_.course.seed = RandomSeed();
     MakeCourse();
     Start();
 }
 
+// A ride with a log moves on to its summary, and one that hardly began goes straight back to the setup.
 void App::EndRide() {
     CloseLog();
     KeepRideSettings();
     SaveSettings(settings_);
+    if (!logPath_.empty()) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        wchar_t date[64] = L"", time[32] = L"";
+        GetDateFormatEx(L"en-US", 0, &st, L"dddd d MMMM", date, static_cast<int>(std::size(date)), nullptr);
+        GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, nullptr, time, static_cast<int>(std::size(time)));
+        doneDate_ = std::wstring(date) + L" · " + time;
+        donePath_ = std::move(logPath_);
+        logPath_.clear();
+        done_ = std::move(ride_);
+        strava_->Clear();
+    }
     ride_.reset();
     selected_ = std::min(selected_, static_cast<int>(Fields().size()) - 1);  // the mode may have changed the rows
     Summarize();
     trainer_->SetTarget({});  // no resistance while setting up
     Redraw();
+}
+
+void App::CloseSummary() {
+    done_.reset();
+    Redraw();
+}
+
+// Uploads the ride, or once it's on Strava, opens it there.
+void App::UploadOrView() {
+    if (!Strava::Available()) return;
+    const Strava::Status s = strava_->status();
+    if (s.state == Strava::State::Uploaded) strava_->OpenActivity();
+    else strava_->Upload(donePath_);
+    Redraw();
+}
+
+void App::OnSummaryClick(D2D1_POINT_2F p) {
+    const SummaryLayout l = LayoutSummary(Size());
+    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    const Strava::Status s = strava_->status();
+    if (inside(l.done)) CloseSummary();
+    else if (inside(l.upload) && s.state != Strava::State::Uploading) UploadOrView();
+    else if (inside(l.signOut) && s.signedIn && s.state != Strava::State::Uploading) strava_->SignOut();
 }
 
 std::wstring App::Status() const {
@@ -494,10 +564,15 @@ void App::UseDevice(ble::Role role, uint64_t address, std::wstring name) {
 void App::OnLinkState(ble::Role role, ble::Link::State state) {
     states_[static_cast<size_t>(role)] = state;
     if (state == ble::Link::State::Connected) {
-        // A device remembered without a name gets the one it reports.
+        // A device remembered without a name gets the one it reports, and one that moved is found at its new
+        // address next time.
         SavedDevice& saved = Saved(role);
-        if (std::wstring name = LinkFor(role).Name(); saved.address && !name.empty() && name != saved.name) {
-            saved.name = std::move(name);
+        const ble::Link& link = LinkFor(role);
+        std::wstring name = link.Name();
+        const uint64_t address = link.Address();
+        if (saved.address && ((!name.empty() && name != saved.name) || (address && address != saved.address))) {
+            if (!name.empty()) saved.name = std::move(name);
+            if (address) saved.address = address;
             SaveSettings(settings_);
         }
     } else if (role == ble::Role::Trainer) {
@@ -635,6 +710,11 @@ void App::OnDevicesClick(D2D1_POINT_2F p) {
 
 void App::OnKey(WPARAM key) {
     if (key == VK_F11) return ToggleFullscreen();
+    if (done_) {
+        if (key == VK_RETURN || key == VK_ESCAPE || key == VK_SPACE) CloseSummary();
+        else if (key == 'U') UploadOrView();
+        return;
+    }
     if (!ride_ && devices_) {
         autoContinue_ = false;
         return OnDevicesKey(key);
@@ -692,6 +772,7 @@ void App::OnKey(WPARAM key) {
 
 void App::OnClick(D2D1_POINT_2F p) {
     if (ride_) return;
+    if (done_) return OnSummaryClick(p);
     if (devices_) {
         autoContinue_ = false;
         return OnDevicesClick(p);
@@ -720,7 +801,7 @@ void App::OnWheel(D2D1_POINT_2F p, int dir) {
         Redraw();
         return;
     }
-    if (devices_) return;
+    if (devices_ || done_) return;
     const std::vector<Field> fields = Fields();
     const SetupLayout l = LayoutSetup(Size(), fields.size());
     for (size_t i = 0; i < fields.size() && i < SetupLayout::kMaxRows; ++i) {
@@ -744,6 +825,12 @@ void App::OnButtons(uint32_t pressed) {
     for (Hold& h : holds_)
         if (down & h.button) h.since = now, h.done = false;
 
+    // On the summary, A is done and Y uploads.
+    if (!ride_ && done_) {
+        if (down & b::kY) UploadOrView();
+        else if (down & (b::kA | b::kB)) CloseSummary();
+        return;
+    }
     if (!ride_ && devices_) {
         if (!down) return;
         autoContinue_ = false;
@@ -802,7 +889,7 @@ void App::OnTick() {
                 WriteLog();
             }
         }
-        if (ride_->finished()) CloseLog();
+        if (ride_->finished()) EndRide();
     }
     // Once the remembered devices have all connected, the screen says so for a moment and moves on.
     if (!ride_ && devices_ && autoContinue_) {
@@ -813,16 +900,35 @@ void App::OnTick() {
     if (!IsIconic(hwnd_)) Redraw();
 }
 
+// The timer runs while something moves by itself: a ride, the countdown to the course or the search after Refresh.
+// Otherwise the window sleeps until something happens.
+void App::UpdateTimer() {
+    const bool searching = refreshedAt_ && GetTickCount64() - refreshedAt_ < kSearchMs;
+    const bool counting = devices_ && !ride_ && !done_ && autoContinue_ && AllConnected();
+    if (!counting) continueAt_ = 0;
+    const bool need = !closed_ && (ride_ || counting || (devices_ && !done_ && searching));
+    if (need == timer_) return;
+    timer_ = need;
+    if (need) {
+        lastTick_ = GetTickCount64();
+        SetTimer(hwnd_, kTimer, kTickMs, nullptr);
+    } else {
+        KillTimer(hwnd_, kTimer);
+        Redraw();  // the last frame, such as the Refresh button without its dots
+    }
+}
+
 void App::Paint() {
     if (IsIconic(hwnd_)) return;
     try {
         if (!target_) {
-            // Hardware when the driver allows it, otherwise Direct2D falls back to software on its own.
+            // In software: a few frames a second take little CPU, and it saves the RAM and startup time of a
+            // Direct3D device, and any trouble with the graphics driver.
             RECT rc;
             GetClientRect(hwnd_, &rc);
             const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
             const auto props =
-                D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(), dpi, dpi);
+                D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(), dpi, dpi);
             winrt::check_hresult(d2d_->CreateHwndRenderTarget(
                 props, D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right, rc.bottom)), target_.put()));
         }
@@ -831,6 +937,51 @@ void App::Paint() {
         for (size_t i = 0; i < ble::kRoleCount; ++i) devices[i] = Device(static_cast<ble::Role>(i));
         if (ride_) {
             renderer_->Draw(target_.get(), *ride_, Status());
+        } else if (done_) {
+            const Strava::Status s = strava_->status();
+            SummaryView view;
+            view.ride = done_.get();
+            view.title = done_->finished() ? L"Ride complete" : L"Ride ended";
+            view.date = doneDate_;
+            std::wstring strava;
+            using S = Strava::State;
+            if (!Strava::Available()) {
+                strava = L"Saved to your rides folder";
+            } else {
+                switch (s.state) {
+                case S::SignedOut:
+                    strava = L"Saved. Upload to Strava signs you in through the browser.";
+                    view.upload = L"Upload to Strava";
+                    break;
+                case S::SigningIn:
+                    strava = L"Finish signing in to Strava in your browser";
+                    view.upload = L"Open sign-in again";
+                    break;
+                case S::Ready:
+                    strava = s.athlete.empty() ? L"Connected to Strava" : L"Connected to Strava as " + s.athlete;
+                    view.stravaTone = Tone::Good;
+                    view.upload = L"Upload to Strava";
+                    break;
+                case S::Uploading:
+                    strava = L"Uploading to Strava";
+                    view.upload = L"Uploading...";
+                    view.uploadEnabled = false;
+                    break;
+                case S::Uploaded:
+                    strava = L"Uploaded to Strava";
+                    view.stravaTone = Tone::Good;
+                    view.upload = L"View on Strava";
+                    break;
+                case S::Failed:
+                    strava = s.error;
+                    view.stravaTone = Tone::Problem;
+                    view.upload = L"Try again";
+                    break;
+                }
+                view.signOut = s.signedIn && s.state != S::Uploading;
+            }
+            view.strava = strava;
+            renderer_->DrawSummary(target_.get(), view);
         } else if (devices_) {
             std::vector<NearbyRow> nearby;
             for (const auto& d : nearby_)
@@ -844,12 +995,17 @@ void App::Paint() {
             case ble::Bluetooth::State::Missing:
                 view.bluetooth = L"No Bluetooth adapter found";
                 view.action = L"Open settings";
+                view.radio = Tone::Problem;
                 break;
             case ble::Bluetooth::State::Off:
                 view.bluetooth = L"Bluetooth is off";
                 view.action = L"Turn on";
+                view.radio = Tone::Problem;
                 break;
-            case ble::Bluetooth::State::On: view.bluetooth = L"Bluetooth is on and looking for devices"; break;
+            case ble::Bluetooth::State::On:
+                view.bluetooth = L"Bluetooth is on and looking for devices";
+                view.radio = Tone::Good;
+                break;
             }
             wchar_t footer[96] = L"Your devices are remembered and connect by themselves next time.";
             if (autoContinue_ && continueAt_) {
@@ -874,7 +1030,7 @@ void App::Paint() {
             view.rows = rows;
             view.selected = selected_;
             view.course = &course_;
-            view.summary = summary_;
+            view.stats = stats_;
             view.devices = devices;
             renderer_->DrawSetup(target_.get(), view);
         }
@@ -929,9 +1085,19 @@ void App::WriteLog() {
             log_ = nullptr;
             return;
         }
+        logPath_ = dir + name;
+        // The start in UTC, a second before this first row.
+        FILETIME ft;
+        GetSystemTimeAsFileTime(&ft);
+        ULARGE_INTEGER t{{ft.dwLowDateTime, ft.dwHighDateTime}};
+        t.QuadPart -= 10'000'000;
+        ft = {t.LowPart, t.HighPart};
+        SYSTEMTIME utc;
+        FileTimeToSystemTime(&ft, &utc);
         const CourseParams& c = ride_->course().params;
-        std::fprintf(log_, "# km=%.1f gain=%.0f max_grade=%.0f loop=%d seed=%u\n", c.km, ride_->course().targetGain,
-                     c.maxGradePct, c.loop ? 1 : 0, c.seed);
+        std::fprintf(log_, "# km=%.1f gain=%.0f max_grade=%.0f loop=%d seed=%u start=%04d-%02d-%02dT%02d:%02d:%02dZ\n",
+                     c.km, ride_->course().targetGain, c.maxGradePct, c.loop ? 1 : 0, c.seed, utc.wYear, utc.wMonth,
+                     utc.wDay, utc.wHour, utc.wMinute, utc.wSecond);
         std::fprintf(log_, "time_s,distance_m,elevation_m,grade_pct,power_w,cadence_rpm,speed_kmh,mode,gear,target,"
                            "heart_rate_bpm\n");
     }
@@ -950,14 +1116,17 @@ void App::CloseLog() {
 }
 
 void App::Shutdown() {
-    if (!trainer_) return;
+    if (closed_) return;
+    closed_ = true;
     KillTimer(hwnd_, kTimer);
+    timer_ = false;
     CloseLog();
     // Release the trainer before the window goes, so it isn't left holding a power target.
     trainer_.reset();
     controllers_.reset();
     monitor_.reset();
     bluetooth_.reset();
+    strava_.reset();
     if (ride_) KeepRideSettings();
     SaveSettings(settings_);
 }
