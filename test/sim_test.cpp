@@ -7,7 +7,7 @@
 #include "sim/course.h"
 #include "sim/physics.h"
 #include "sim/ride.h"
-#include "sim/tcx.h"
+#include "sim/fit.h"
 
 static int failures = 0;
 
@@ -69,18 +69,25 @@ int main() {
     if (std::abs(ride.work() / 1000 - kj) > 1 || ride.averagePower() != 250 || std::abs(ride.calories() - kj) > kj * 0.01)
         ++failures, std::printf("FAIL calories %.0f kcal for %.0f kJ\n", ride.calories(), kj);
 
-    // A ride log as TCX: one trackpoint a second from the start, with the calories of the work done.
-    const std::string tcx = RideToTcx(
+    // A ride log as FIT: a header and file that pass their CRCs, and one 17-byte record a second.
+    const char* log =
         "# km=1.0 gain=0 max_grade=10 loop=0 seed=1 start=2026-12-31T23:59:59Z\n"
         "time_s,distance_m,elevation_m,grade_pct,power_w,cadence_rpm,speed_kmh,mode,gear,target,heart_rate_bpm\n"
-        "1,5.0,100.0,0.0,1004,90,18.0,erg,10,200,0\n"
-        "2,10.0,100.1,0.0,1004,91,18.0,erg,10,200,141\n");
-    const bool tcxOk = tcx.find("<Id>2026-12-31T23:59:59Z</Id>") != std::string::npos &&
-                       tcx.find("<Time>2027-01-01T00:00:01Z</Time>") != std::string::npos &&
-                       tcx.find("<Calories>2</Calories>") != std::string::npos &&
-                       tcx.find("<HeartRateBpm><Value>141</Value>") != std::string::npos &&
-                       tcx.find("<HeartRateBpm><Value>0") == std::string::npos && RideToTcx("time_s\n").empty();
-    if (!tcxOk) ++failures, std::printf("FAIL tcx\n%s\n", tcx.c_str());
+        "1,5.0,100.0,0.0,1004,90,18.0,erg,10,200,0\n";
+    const std::string one = RideToFit(log);
+    const std::string fit = RideToFit(std::string(log) + "2,10.0,100.1,0.0,1004,91,18.0,erg,10,200,141\n");
+    auto crc = [](std::string_view bytes) {
+        unsigned c = 0;
+        for (const unsigned char b : bytes) {
+            c ^= b;
+            for (int i = 0; i < 8; ++i) c = c & 1 ? (c >> 1) ^ 0xA001 : c >> 1;
+        }
+        return c;
+    };
+    const bool fitOk = fit.size() > 16 && fit.compare(8, 4, ".FIT") == 0 && crc(fit) == 0 &&
+                       crc(std::string_view(fit).substr(0, 14)) == 0 && fit.size() - one.size() == 17 &&
+                       RideToFit("time_s\n").empty();
+    if (!fitOk) ++failures, std::printf("FAIL fit\n");
 
     std::printf("%d courses, 250 W: %.1f km/h flat, %.1f km/h at 8%%, 30 km and %.0f m up in %d:%02d. %s\n", courses,
                 flat, climb, ride.climbed(), int(hours), int(hours * 60) % 60, failures ? "FAILED" : "OK");

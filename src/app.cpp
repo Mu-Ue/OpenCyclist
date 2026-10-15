@@ -24,7 +24,7 @@
 #include "config.h"
 #include "sim/course.h"
 #include "sim/ride.h"
-#include "sim/tcx.h"
+#include "sim/fit.h"
 #include "ui/renderer.h"
 
 namespace {
@@ -79,7 +79,7 @@ private:
 
     // The summary screen after a ride.
     void CloseSummary();
-    void SaveTcx();
+    void SaveFit();
     void ShowFile() const;
     void OnSummaryClick(D2D1_POINT_2F p);
 
@@ -138,7 +138,7 @@ private:
     std::unique_ptr<Ride> ride_;  // null on the setup and devices screens
     bool confirmEnd_ = false;  // asking whether to end the ride
     std::unique_ptr<Ride> done_;  // the ride just ended, which the summary screen shows when not null
-    std::wstring doneDate_, donePath_;  // donePath_ is the ride as a TCX file, empty when it was too short
+    std::wstring doneDate_, donePath_;  // donePath_ is the ride as a FIT file, empty when it was too short
 
     bool devices_ = false;  // the devices screen shows instead of the setup screen
     std::vector<ble::Bluetooth::Device> nearby_;  // found nearby and not in use
@@ -480,7 +480,7 @@ void App::AskToEnd() {
 // The ride moves on to its summary.
 void App::EndRide() {
     CloseLog();
-    SaveTcx();
+    SaveFit();
     KeepRideSettings();
     SaveSettings(settings_);
     confirmEnd_ = false;
@@ -506,20 +506,19 @@ void App::CloseSummary() {
     Redraw();
 }
 
-// The ride log as a TCX file next to it, which COROS, Garmin Connect, Strava and others import. COROS turns down
-// files under 20 KB, which is about a minute of riding.
-void App::SaveTcx() {
+// The ride log as a FIT file next to it, which COROS, Garmin Connect, Strava and others import.
+void App::SaveFit() {
     donePath_.clear();
     if (logPath_.empty()) return;
     std::ifstream in(logPath_, std::ios::binary);
-    const std::string tcx = RideToTcx(std::string(std::istreambuf_iterator<char>(in), {}));
-    if (tcx.empty()) return;
-    std::wstring path = logPath_.substr(0, logPath_.rfind(L'.')) + L".tcx";
+    const std::string fit = RideToFit(std::string(std::istreambuf_iterator<char>(in), {}));
+    if (fit.empty()) return;
+    std::wstring path = logPath_.substr(0, logPath_.rfind(L'.')) + L".fit";
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (out.write(tcx.data(), static_cast<std::streamsize>(tcx.size()))) donePath_ = std::move(path);
+    if (out.write(fit.data(), static_cast<std::streamsize>(fit.size()))) donePath_ = std::move(path);
 }
 
-// Shows the ride's TCX file in File Explorer, ready to drag into an upload page.
+// Shows the ride's FIT file in File Explorer, ready to drag into an upload page.
 void App::ShowFile() const {
     if (donePath_.empty()) return;
     const std::wstring args = L"/select,\"" + donePath_ + L"\"";
@@ -983,7 +982,7 @@ void App::Paint() {
             if (donePath_.empty()) {
                 view.note = L"Too short to save as a file";
             } else {
-                view.note = L"Saved as a TCX file. Import it at t.coros.com, Garmin Connect or Strava.";
+                view.note = L"Saved as a FIT file. Import it at t.coros.com, Garmin Connect or Strava.";
                 view.file = L"Show file";
             }
             renderer_->DrawSummary(target_.get(), view);

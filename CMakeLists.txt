@@ -12,7 +12,7 @@ add_library(sim STATIC
     src/sim/course.cpp
     src/sim/physics.cpp
     src/sim/ride.cpp
-    src/sim/tcx.cpp)
+    src/sim/fit.cpp)
 target_include_directories(sim PUBLIC src)
 target_compile_definitions(sim PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(sim PUBLIC /W4 /permissive- /utf-8 /sdl /guard:cf /guard:ehcont)
