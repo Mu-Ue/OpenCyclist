@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/icon.png" width="64" alt="">
   <h1>OpenCyclist</h1>
-  <p>A minimal indoor cycling app for Windows, built for the Zwift Ride.</p>
+  <p>A minimal indoor cycling app for Windows that works with Bluetooth smart trainers.</p>
   <img src="docs/ride.png" alt="A ride in progress">
 </div>
 
@@ -15,7 +15,7 @@ Pick a course, press R until you like it, then Enter to ride. Sim mode uses virt
 
 Every ride is saved as a FIT file in `%APPDATA%\OpenCyclist\rides`. Import it into COROS, Garmin Connect or Strava.
 
-| Key | Zwift Ride | Action |
+| Key | Controller | Action |
 | --- | --- | --- |
 | ↑ → | Right shifters | Harder: gear up or +5 W |
 | ↓ ← | Left shifters | Easier |
