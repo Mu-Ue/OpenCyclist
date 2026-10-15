@@ -11,21 +11,9 @@ Get `OpenCyclist.exe` from the latest release and run it. It needs Windows 10 or
 
 ## Usage
 
-Close Zwift and Zwift Companion first. The trainer takes one app at a time.
+Pick a course, press R until you like it, then Enter to ride. Sim mode uses virtual gears. ERG mode holds a target power.
 
-The first start shows the devices screen. Wake your trainer, Zwift Ride and heart rate strap, such as a Polar H10, then connect each one. If Bluetooth is off, turn it on from there.
-
-Your devices are remembered. Next time they connect on their own, and the app moves on to the course once they have.
-
-Pick a distance, elevation gain and max grade. The course appears on the right. Press R until you like it, then Enter to ride.
-
-Distance comes from your real power, so climbs take as long as they would outside.
-
-There are two modes. Sim uses virtual gears and makes climbs harder. ERG holds a target power.
-
-End the ride with the End ride button, Esc or B, and confirm. A summary shows your time, distance, climbing, power and calories.
-
-Every ride is also saved as a TCX file. To get it into COROS, import it at [t.coros.com](https://t.coros.com) under Import Data. Garmin Connect and Strava take it too.
+Every ride is saved as a FIT file in `%APPDATA%\OpenCyclist\rides`. Import it into COROS, Garmin Connect or Strava.
 
 | Key | Zwift Ride | Action |
 | --- | --- | --- |
@@ -39,14 +27,6 @@ Every ride is also saved as a TCX file. To get it into COROS, import it at [t.co
 | Esc | B | End the ride, after a yes |
 | F | Y | Show the ride file, on the summary |
 | F11 | | Full screen |
-
-On the setup screen, the D-pad picks a setting, the shifters change it and A starts.
-
-On the devices screen, Enter or A connects or disconnects and Esc or B continues.
-
-Rides are saved in `%APPDATA%\OpenCyclist\rides`.
-
-Options such as `--km 30 --gain 1000 --max-grade 10 --loop --mode erg --erg 200 --seed 12345` set up the course from the command line.
 
 ## Build from source
 
