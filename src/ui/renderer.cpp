@@ -545,7 +545,7 @@ void Renderer::DrawProfile(ID2D1RenderTarget* target, const Course& course, doub
         hi = std::max(hi, double(heights_[i]));
     }
     const double span = std::max(hi - lo, minSpan) * 1.12;
-    const double base = (lo + hi) / 2 - span / 2;
+    const double base = std::max(0.0, (lo + hi) / 2 - span / 2);  // courses start at 0 m
     auto y = [&](double e) { return height - static_cast<float>((e - base) / span) * height; };
 
     // Grid lines at round elevations, and ticks at round distances.

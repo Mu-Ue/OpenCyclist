@@ -190,15 +190,13 @@ Course GenerateCourse(const CourseParams& params) {
     }
 
     course.elevation.resize(n + 1);
-    double e = rng.Uniform(100.0, 1200.0), lowest = e;
-    course.elevation[0] = static_cast<float>(e);
+    // Heights count up from the lowest point, so the profile reads as how far up the rider is.
+    double e = 0.0, lowest = 0.0;
     for (size_t i = 0; i < n; ++i) {
         e += g[i] * kCourseStep;
         lowest = std::min(lowest, e);
         course.elevation[i + 1] = static_cast<float>(e);
     }
-    // Keep the whole course above sea level.
-    if (lowest < 5.0)
-        for (float& x : course.elevation) x += static_cast<float>(5.0 - lowest);
+    for (float& x : course.elevation) x -= static_cast<float>(lowest);
     return course;
 }
