@@ -3,15 +3,17 @@
 namespace ble {
 
 using namespace std::chrono_literals;
+namespace bt = winrt::Windows::Devices::Bluetooth;
 
-Link::Link(HWND window, Role role, Matcher matches, uint64_t address, std::wstring name)
-    : window_(window), role_(role), matches_(matches), address_(address), name_(std::move(name)) {}
+Link::Link(HWND window, Role role, Matcher matches, bool lowLatency, uint64_t address, std::wstring name)
+    : window_(window), role_(role), matches_(matches), lowLatency_(lowLatency), address_(address), name_(std::move(name)) {}
 
 void Link::Stop() {
     {
         std::lock_guard lock(mutex_);
         stop_ = true;
         SetEvent(wake_.get());
+        SetEvent(nudge_.get());
     }
     WaitForSingleObject(done_.get(), 5000);
 }
@@ -22,11 +24,17 @@ void Link::Use(uint64_t address, std::wstring name) {
     name_ = std::move(name);
     ++generation_;
     SetEvent(wake_.get());
+    SetEvent(nudge_.get());
 }
 
 std::wstring Link::Name() const {
     std::lock_guard lock(mutex_);
     return name_;
+}
+
+uint64_t Link::Address() const {
+    std::lock_guard lock(mutex_);
+    return address_;
 }
 
 void Link::SetState(State state) const {
@@ -52,8 +60,10 @@ winrt::fire_and_forget Link::Run() {
             co_await Connect(address, std::move(name));
         } catch (...) {
             // A dropped connection surfaces as an exception from whichever call was in flight. Start over.
+            ++failures_;
         }
-        if (!Changed()) co_await winrt::resume_on_signal(wake_.get(), 2s);
+        // Straight back after a drop, so a blip costs little. A failed try has already waited for the device.
+        if (!Changed()) co_await winrt::resume_on_signal(wake_.get(), failures_ ? 1s : 250ms);
     }
     SetEvent(done_.get());
 }
@@ -70,31 +80,59 @@ IAsyncAction Link::Connect(uint64_t address, std::wstring name) {
         co_return;
     }
 
-    // Try the saved address first. If it keeps failing, the device may have a new address, so look for one like
-    // it, with the same name when the advert carries one.
-    if (failures_ >= 2) {
-        SetState(State::Missing);
-        address = co_await Scan(
-            [matches = matches_, name](const adv::BluetoothLEAdvertisement& ad) {
-                if (!matches(ad)) return false;
-                const std::wstring local = CleanName(ad.LocalName());
-                return name.empty() || local.empty() || local == name;
+    // Connecting straight away is quickest and costs the least: the radio itself watches for the address and
+    // Windows connects the moment the device advertises. A device that keeps failing may have moved to a new
+    // address, so every third try instead looks for an advert like it, from its address or with its name.
+    Connection link;
+    link.fresh = failures_ > 0;
+    link.device = co_await BluetoothLEDevice::FromBluetoothAddressAsync(address);
+    SetState(failures_ >= 2 ? State::Missing : State::Connecting);
+    if ((!link.device || !Connected(link.device)) && failures_ % 3 == 2) {
+        const uint64_t found = co_await Scan(
+            [matches = matches_, address, name](uint64_t from, const adv::BluetoothLEAdvertisement& ad) {
+                return from == address || (!name.empty() && matches(ad) && CleanName(ad.LocalName()) == name);
             },
             10s, wake_.get());
-        if (address == 0) co_return;
+        if (found == 0) {
+            if (!Changed()) ++failures_;
+            co_return;
+        }
+        if (found != address) {
+            {
+                std::lock_guard lock(mutex_);
+                if (Changed()) co_return;
+                address_ = found;
+            }
+            link.device = co_await BluetoothLEDevice::FromBluetoothAddressAsync(found);
+        }
+        SetState(State::Connecting);
     }
-    SetState(State::Connecting);
-
-    Connection link;
-    link.device = co_await BluetoothLEDevice::FromBluetoothAddressAsync(address);
-    if (link.device && name.empty()) {
+    if (!link.device) {
+        ++failures_;
+        co_return;
+    }
+    if (name.empty()) {
         // A device remembered without a name, such as from an older version, gets the one Windows knows.
         if (std::wstring known = CleanName(link.device.Name()); !known.empty()) {
             std::lock_guard lock(mutex_);
             if (!Changed()) name_ = std::move(known);
         }
     }
-    if (link.device && co_await Session(link)) failures_ = 0;
+    // Windows keeps the link up between messages and brings it back after a blip on its own (Windows 10 1803 and
+    // newer), and on Windows 11 a low-latency link can be asked for. Older Windows lacks these, which is fine.
+    try {
+        link.session = co_await gatt::GattSession::FromDeviceIdAsync(link.device.BluetoothDeviceId());
+        if (link.session) link.session.MaintainConnection(true);
+    } catch (...) {
+    }
+    if (lowLatency_) {
+        try {
+            link.fast = link.device.RequestPreferredConnectionParameters(
+                bt::BluetoothLEPreferredConnectionParameters::ThroughputOptimized());
+        } catch (...) {
+        }
+    }
+    if (co_await Session(link)) failures_ = 0;
     else ++failures_;
 }
 

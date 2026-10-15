@@ -37,27 +37,30 @@ bool IsTrainer(const adv::BluetoothLEAdvertisement& ad) {
 }
 
 Trainer::Trainer(HWND window, uint64_t address, std::wstring name)
-    : Link(window, Role::Trainer, IsTrainer, address, std::move(name)) {
+    : Link(window, Role::Trainer, IsTrainer, true, address, std::move(name)) {
     Start();
 }
 
 Trainer::~Trainer() { Stop(); }
 
+// A new target wakes the session, so a shift reaches the trainer straight away.
 void Trainer::SetTarget(TrainerTarget target) {
     std::lock_guard lock(mutex_);
+    if (SameTarget(target, target_)) return;
     target_ = target;
+    SetEvent(Nudge());
 }
 
 IAsyncOperation<bool> Trainer::Session(Connection& link) {
-    link.service = co_await FindService(link.device, kFtmsService);
+    link.service = co_await FindService(link.device, kFtmsService, link.fresh);
     if (!link.service) co_return false;
 
-    const auto data = co_await FindCharacteristic(link.service, kIndoorBikeData);
-    const auto control = co_await FindCharacteristic(link.service, kControlPoint);
-    if (!data || !control) co_return true;
+    const auto data = co_await FindCharacteristic(link.service, kIndoorBikeData, link.fresh);
+    const auto control = co_await FindCharacteristic(link.service, kControlPoint, link.fresh);
+    if (!data || !control) co_return false;
 
     // Resistance range: min, max (sint16) and step (uint16), in 0.1 units.
-    if (const auto range = co_await FindCharacteristic(link.service, kResistanceRange)) {
+    if (const auto range = co_await FindCharacteristic(link.service, kResistanceRange, link.fresh)) {
         const auto read = co_await range.ReadValueAsync(winrt::Windows::Devices::Bluetooth::BluetoothCacheMode::Uncached);
         if (read.Status() == gatt::GattCommunicationStatus::Success && read.Value().Length() >= 4) {
             const uint8_t* p = read.Value().data();
@@ -69,8 +72,8 @@ IAsyncOperation<bool> Trainer::Session(Connection& link) {
     const auto dataRevoker = data.ValueChanged(winrt::auto_revoke, [this](const auto&, const gatt::GattValueChangedEventArgs& args) {
         OnBikeData(args.CharacteristicValue());
     });
-    if (!co_await Subscribe(data, Cccd::Notify) || !co_await Subscribe(control, Cccd::Indicate)) co_return true;
-    if (!co_await Write(control, {kRequestControl}, true)) co_return true;
+    if (!co_await Subscribe(data, Cccd::Notify) || !co_await Subscribe(control, Cccd::Indicate)) co_return false;
+    if (!co_await Write(control, {kRequestControl}, true)) co_return false;
     co_await Write(control, {kStart}, true);
 
     lastData_ = GetTickCount64();
@@ -88,7 +91,7 @@ IAsyncOperation<bool> Trainer::Session(Connection& link) {
             sent = co_await Send(control, target);
             last = target;
         }
-        co_await winrt::resume_on_signal(Wake(), std::chrono::milliseconds(kTickMs));
+        co_await winrt::resume_on_signal(Nudge(), 1s);
     }
     // Hand the trainer back free-wheeling when the app closes or switches to another one.
     if (Changed()) co_await Write(control, {kReset}, true);

@@ -47,14 +47,16 @@ std::wstring CleanName(std::wstring_view name);
 // Whether a Bluetooth LE radio is present and on.
 IAsyncOperation<bool> RadioOn();
 
-// Scans until `match` accepts an advertisement or the timeout passes. Returns the device address, or 0. Stops
-// early when `wake` is signalled.
-IAsyncOperation<uint64_t> Scan(std::function<bool(const adv::BluetoothLEAdvertisement&)> match,
+// Scans until `match` accepts an advertisement from an address or the timeout passes. Returns the device address,
+// or 0. Stops early when `wake` is signalled.
+IAsyncOperation<uint64_t> Scan(std::function<bool(uint64_t, const adv::BluetoothLEAdvertisement&)> match,
                                std::chrono::seconds timeout, HANDLE wake);
 
-// The first service or characteristic with this UUID, or null.
-IAsyncOperation<gatt::GattDeviceService> FindService(BluetoothLEDevice device, winrt::guid id);
-IAsyncOperation<gatt::GattCharacteristic> FindCharacteristic(gatt::GattDeviceService service, winrt::guid id);
+// The first service or characteristic with this UUID, or null. Windows' cache answers first, which needs no
+// round trip to the device, and the device itself when the cache doesn't have it. `fresh` skips the cache, which
+// can be out of date after the device's firmware changes.
+IAsyncOperation<gatt::GattDeviceService> FindService(BluetoothLEDevice device, winrt::guid id, bool fresh);
+IAsyncOperation<gatt::GattCharacteristic> FindCharacteristic(gatt::GattDeviceService service, winrt::guid id, bool fresh);
 
 IAsyncOperation<bool> Subscribe(gatt::GattCharacteristic c, gatt::GattClientCharacteristicConfigurationDescriptorValue how);
 IAsyncOperation<bool> Write(gatt::GattCharacteristic c, std::vector<uint8_t> bytes, bool withResponse);
@@ -62,7 +64,10 @@ IAsyncOperation<bool> Write(gatt::GattCharacteristic c, std::vector<uint8_t> byt
 // Closes the service and device when the session ends, however it ends, so Windows drops the connection.
 struct Connection {
     BluetoothLEDevice device{nullptr};
+    gatt::GattSession session{nullptr};  // keeps the link up between messages
+    winrt::Windows::Devices::Bluetooth::BluetoothLEPreferredConnectionParametersRequest fast{nullptr};
     gatt::GattDeviceService service{nullptr};
+    bool fresh = false;  // the last try failed, so look past Windows' cache
     Connection() = default;
     Connection(const Connection&) = delete;
     Connection& operator=(const Connection&) = delete;

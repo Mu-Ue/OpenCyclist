@@ -23,11 +23,13 @@ public:
     // Switches to another device, or to none with address 0. The same device again retries it straight away.
     void Use(uint64_t address, std::wstring name);
     std::wstring Name() const;
+    uint64_t Address() const;  // can change when the device turns up at a new one
 
 protected:
     using Matcher = bool (*)(const adv::BluetoothLEAdvertisement&);
 
-    Link(HWND window, Role role, Matcher matches, uint64_t address, std::wstring name);
+    // A low-latency link answers sooner, at some cost in battery, for devices whose every message matters.
+    Link(HWND window, Role role, Matcher matches, bool lowLatency, uint64_t address, std::wstring name);
     ~Link() = default;
 
     // Derived classes call Start at the end of their constructor and Stop at the start of their destructor, so
@@ -42,6 +44,9 @@ protected:
     // The app is closing or wants another device. Wake is set when this turns true.
     bool Changed() const { return stop_ || generation_ != session_; }
     HANDLE Wake() const { return wake_.get(); }
+    // What a session waits on: set with Wake, and by the session's own news, such as a new trainer target. Resets
+    // as a wait ends.
+    HANDLE Nudge() const { return nudge_.get(); }
     void SetState(State state) const;
     void Post(UINT message, WPARAM w, LPARAM l = 0) const { PostMessageW(window_, message, w, l); }
 
@@ -52,6 +57,7 @@ private:
     HWND window_;
     Role role_;
     Matcher matches_;
+    bool lowLatency_;
     mutable std::mutex mutex_;
     uint64_t address_;
     std::wstring name_;
@@ -60,6 +66,7 @@ private:
     int failures_ = 0;                     // connects that failed in a row
     std::atomic<bool> stop_{false};
     winrt::handle wake_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    winrt::handle nudge_{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     winrt::handle done_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
 };
 

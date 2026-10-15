@@ -32,11 +32,11 @@ IAsyncOperation<bool> RadioOn() {
     co_return radio && radio.State() == winrt::Windows::Devices::Radios::RadioState::On;
 }
 
-IAsyncOperation<uint64_t> Scan(std::function<bool(const adv::BluetoothLEAdvertisement&)> match,
+IAsyncOperation<uint64_t> Scan(std::function<bool(uint64_t, const adv::BluetoothLEAdvertisement&)> match,
                                std::chrono::seconds timeout, HANDLE wake) {
     // Shared with the callbacks, which can still run briefly after the watcher stops.
     struct State {
-        std::function<bool(const adv::BluetoothLEAdvertisement&)> match;
+        std::function<bool(uint64_t, const adv::BluetoothLEAdvertisement&)> match;
         std::atomic<uint64_t> address{0};
         std::atomic<bool> stopped{false};
         winrt::handle found{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
@@ -47,7 +47,7 @@ IAsyncOperation<uint64_t> Scan(std::function<bool(const adv::BluetoothLEAdvertis
     adv::BluetoothLEAdvertisementWatcher watcher;
     watcher.ScanningMode(adv::BluetoothLEScanningMode::Active);  // scan responses carry the device names
     watcher.Received([state](const auto&, const adv::BluetoothLEAdvertisementReceivedEventArgs& args) {
-        if (state->address == 0 && state->match(args.Advertisement())) {
+        if (state->address == 0 && state->match(args.BluetoothAddress(), args.Advertisement())) {
             state->address = args.BluetoothAddress();
             SetEvent(state->found.get());
         }
@@ -69,17 +69,22 @@ IAsyncOperation<uint64_t> Scan(std::function<bool(const adv::BluetoothLEAdvertis
     co_return state->address.load();
 }
 
-IAsyncOperation<gatt::GattDeviceService> FindService(BluetoothLEDevice device, winrt::guid id) {
-    const auto result = co_await device.GetGattServicesForUuidAsync(id, BluetoothCacheMode::Uncached);
-    if (result.Status() != gatt::GattCommunicationStatus::Success || result.Services().Size() == 0) co_return nullptr;
-    co_return result.Services().GetAt(0);
+IAsyncOperation<gatt::GattDeviceService> FindService(BluetoothLEDevice device, winrt::guid id, bool fresh) {
+    for (const auto mode : {fresh ? BluetoothCacheMode::Uncached : BluetoothCacheMode::Cached, BluetoothCacheMode::Uncached}) {
+        const auto result = co_await device.GetGattServicesForUuidAsync(id, mode);
+        if (result.Status() == gatt::GattCommunicationStatus::Success && result.Services().Size() > 0)
+            co_return result.Services().GetAt(0);
+    }
+    co_return nullptr;
 }
 
-IAsyncOperation<gatt::GattCharacteristic> FindCharacteristic(gatt::GattDeviceService service, winrt::guid id) {
-    const auto result = co_await service.GetCharacteristicsForUuidAsync(id, BluetoothCacheMode::Uncached);
-    if (result.Status() != gatt::GattCommunicationStatus::Success || result.Characteristics().Size() == 0)
-        co_return nullptr;
-    co_return result.Characteristics().GetAt(0);
+IAsyncOperation<gatt::GattCharacteristic> FindCharacteristic(gatt::GattDeviceService service, winrt::guid id, bool fresh) {
+    for (const auto mode : {fresh ? BluetoothCacheMode::Uncached : BluetoothCacheMode::Cached, BluetoothCacheMode::Uncached}) {
+        const auto result = co_await service.GetCharacteristicsForUuidAsync(id, mode);
+        if (result.Status() == gatt::GattCommunicationStatus::Success && result.Characteristics().Size() > 0)
+            co_return result.Characteristics().GetAt(0);
+    }
+    co_return nullptr;
 }
 
 IAsyncOperation<bool> Subscribe(gatt::GattCharacteristic c, gatt::GattClientCharacteristicConfigurationDescriptorValue how) {
@@ -98,6 +103,8 @@ IAsyncOperation<bool> Write(gatt::GattCharacteristic c, std::vector<uint8_t> byt
 Connection::~Connection() {
     try {
         if (service) service.Close();
+        if (fast) fast.Close();
+        if (session) session.Close();
         if (device) device.Close();
     } catch (...) {
     }

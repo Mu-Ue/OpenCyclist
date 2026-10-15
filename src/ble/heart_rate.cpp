@@ -22,27 +22,27 @@ bool IsHeartRateMonitor(const adv::BluetoothLEAdvertisement& ad) {
 }
 
 HeartRateMonitor::HeartRateMonitor(HWND window, uint64_t address, std::wstring name)
-    : Link(window, Role::HeartRate, IsHeartRateMonitor, address, std::move(name)) {
+    : Link(window, Role::HeartRate, IsHeartRateMonitor, false, address, std::move(name)) {
     Start();
 }
 
 HeartRateMonitor::~HeartRateMonitor() { Stop(); }
 
 IAsyncOperation<bool> HeartRateMonitor::Session(Connection& link) {
-    link.service = co_await FindService(link.device, kHeartRateService);
+    link.service = co_await FindService(link.device, kHeartRateService, link.fresh);
     if (!link.service) co_return false;
-    const auto measurement = co_await FindCharacteristic(link.service, kMeasurement);
-    if (!measurement) co_return true;
+    const auto measurement = co_await FindCharacteristic(link.service, kMeasurement, link.fresh);
+    if (!measurement) co_return false;
 
     const auto revoker = measurement.ValueChanged(winrt::auto_revoke, [this](const auto&, const gatt::GattValueChangedEventArgs& args) {
         OnMeasurement(args.CharacteristicValue());
     });
-    if (!co_await Subscribe(measurement, Cccd::Notify)) co_return true;
+    if (!co_await Subscribe(measurement, Cccd::Notify)) co_return false;
 
     lastData_ = GetTickCount64();
     SetState(State::Connected);
     while (!Changed() && Connected(link.device)) {
-        co_await winrt::resume_on_signal(Wake(), 1s);
+        co_await winrt::resume_on_signal(Nudge(), 1s);
         // Off the chest, a strap goes quiet. Show nothing rather than an old number.
         if (GetTickCount64() - lastData_ > kStaleMs) Post(WM_HEART_RATE, 0);
     }
