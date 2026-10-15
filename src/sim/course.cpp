@@ -131,8 +131,10 @@ Course GenerateCourse(const CourseParams& params) {
     const double maxGrade = std::clamp(params.maxGradePct, 1.0, 25.0) / 100.0;
     Rng rng{params.seed};
 
-    // A point-to-point course too hilly for its descents ends higher up instead, so all of the gain fits.
-    double descentShare = params.loop ? 1.0 : rng.Uniform(0.3, 1.0);
+    // A point-to-point course too hilly for its descents ends higher up instead, so all of the gain fits. Both
+    // route types draw the same numbers and lay out the same course, so switching only tilts the profile.
+    const double share = rng.Uniform(0.3, 1.0);
+    double descentShare = params.loop ? 1.0 : share;
     const double gain = std::clamp(params.gainM, 0.0, MaxGain(params));
     if (!params.loop && gain > 0.0)
         descentShare = std::clamp(length * maxGrade * kHeadroom / gain - 1.0, 0.0, descentShare);
@@ -145,7 +147,7 @@ Course GenerateCourse(const CourseParams& params) {
         // climbing and descending leans towards where the course should be by now.
         const double hilliness = gain / length;
         const double flatChance = std::clamp(1.0 - hilliness * 40.0, 0.1, 0.8);
-        const double endHeight = gain - descent;
+        const double endHeight = gain * (1.0 - share);
         const double longest = std::clamp(length / 4.0, 600.0, 8000.0);
         double height = 0.0;
         for (size_t i = 0; i < n;) {
