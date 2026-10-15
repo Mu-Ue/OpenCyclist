@@ -107,7 +107,7 @@ public:
 private:
     enum class Button { Primary, Secondary, Strava };
 
-    float Prepare(ID2D1RenderTarget* target);
+    float Prepare(ID2D1RenderTarget* target, bool grow = false);
     void DrawHeader(ID2D1RenderTarget* target, std::wstring_view title, std::wstring_view hint);
     void DrawCard(ID2D1RenderTarget* target, D2D1_RECT_F box, bool focused = false);
     void DrawStat(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view label, std::wstring_view value,
@@ -128,7 +128,7 @@ private:
     winrt::com_ptr<ID2D1Factory> factory_;
     std::wstring textFont_, numberFont_;
     winrt::com_ptr<IDWriteTypography> tabular_;  // digits of one width, so live numbers don't jiggle
-    // Text sizes follow the window size; the formats are remade when it changes.
+    // Text sizes follow the layout scale; the formats are remade when it changes.
     float scale_ = 0.0f;
     winrt::com_ptr<IDWriteTextFormat> label_, small_, row_, title_, heading_, button_;
     // Brushes belong to one target; they're remade when the target changes. Holding it keeps its address unique.

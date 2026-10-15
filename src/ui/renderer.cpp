@@ -17,8 +17,12 @@ constexpr UINT32 kBackdropTop = 0x141414, kBackground = 0x0A0A0A, kSurface = 0x1
 constexpr UINT32 kGrades[] = {0x2E2E2E, 0x404040, 0x5E5E5E, 0x838383, 0xABABAB, 0xD6D6D6};
 constexpr double kGradeSteps[] = {-0.02, 0.03, 0.06, 0.09, 0.12};  // where each grade shade starts
 
-// Layout sizes are in DIPs for a 1280 x 720 window and scale with it.
-float Scale(D2D1_SIZE_F size) { return std::max(0.1f, std::min(size.width / 1280.0f, size.height / 720.0f)); }
+// Layout sizes are in DIPs for a 1280 x 720 window and shrink with it. Only the ride screen grows past that, to be
+// read from the bike; the menus keep their size and spread out instead.
+float Scale(D2D1_SIZE_F size, bool grow = false) {
+    const float fit = std::min(size.width / 1280.0f, size.height / 720.0f);
+    return std::max(0.1f, grow ? fit : std::min(fit, 1.0f));
+}
 
 bool HasFont(IDWriteFactory* dwrite, const wchar_t* family) {
     winrt::com_ptr<IDWriteFontCollection> fonts;
@@ -115,7 +119,7 @@ Renderer::Renderer(IDWriteFactory* dwrite) {
 }
 
 // Brushes for this target and text formats for its size. Returns the layout scale.
-float Renderer::Prepare(ID2D1RenderTarget* target) {
+float Renderer::Prepare(ID2D1RenderTarget* target, bool grow) {
     if (brushTarget_.get() != target) {
         auto make = [&](UINT32 rgb, winrt::com_ptr<ID2D1SolidColorBrush>& brush) {
             brush = nullptr;
@@ -152,7 +156,7 @@ float Renderer::Prepare(ID2D1RenderTarget* target) {
         for (ProfileCache& c : cache_) c = {};
         brushTarget_.copy_from(target);
     }
-    const float s = Scale(target->GetSize());
+    const float s = Scale(target->GetSize(), grow);
     if (s != scale_) {
         label_ = MakeFormat(dwrite_.get(), textFont_, DWRITE_FONT_WEIGHT_NORMAL, 14.0f * s);
         small_ = MakeFormat(dwrite_.get(), textFont_, DWRITE_FONT_WEIGHT_NORMAL, 15.0f * s);
@@ -179,7 +183,7 @@ void Renderer::DrawHeader(ID2D1RenderTarget* target, std::wstring_view title, st
 }
 
 void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_view status) {
-    const float s = Prepare(target), pad = 24.0f * s, gap = 12.0f * s;
+    const float s = Prepare(target, true), pad = 24.0f * s, gap = 12.0f * s;
     const D2D1_SIZE_F size = target->GetSize();
 
     // Live numbers in cards, with heart rate when there is a monitor. The last one depends on the mode.
