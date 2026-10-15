@@ -34,7 +34,7 @@ struct SetupView {
     std::span<const SetupRow> rows;
     int selected = 0;
     const Course* course = nullptr;
-    std::span<const std::wstring> stats;  // under the course preview, such as its length and gain
+    std::span<const std::wstring> stats;  // under the course preview, such as its rough time
     std::span<const DeviceInfo> devices;
 };
 

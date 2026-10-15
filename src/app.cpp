@@ -133,7 +133,7 @@ private:
     int repeatDir_ = 0;    // 0 when nothing is held
 
     Course course_;  // on the setup screen, and the one being ridden
-    std::wstring stats_[3];  // the course's length, gain and rough time
+    std::wstring stats_[1];  // the course's rough time
     int selected_ = 0;
     std::unique_ptr<Ride> ride_;  // null on the setup and devices screens
     bool confirmEnd_ = false;  // asking whether to end the ride
@@ -425,20 +425,16 @@ void App::MakeCourse() {
     Summarize();
 }
 
-// The course in numbers, with a rough moving time at the ERG target or else at 2.5 W/kg.
+// A rough moving time for the course at the ERG target or else at 2.5 W/kg.
 void App::Summarize() {
     const int watts = settings_.mode == Mode::Erg && settings_.ergW >= 50
                           ? settings_.ergW
                           : static_cast<int>(std::lround(settings_.riderKg * 2.5 / 5)) * 5;
     const int t = static_cast<int>(EstimateTime(course_, settings_.riderKg + kBikeKg, watts));
     wchar_t buf[64];
-    swprintf_s(buf, L"%.1f km", course_.Length() / 1000);
-    stats_[0] = buf;
-    swprintf_s(buf, L"%.0f m up", course_.Gain());
-    stats_[1] = buf;
     if (t > 0) swprintf_s(buf, L"About %d:%02d at %d W", t / 3600, t / 60 % 60, watts);
     else swprintf_s(buf, L"Too steep for %d W", watts);
-    stats_[2] = buf;
+    stats_[0] = buf;
 }
 
 void App::Reroll() {
