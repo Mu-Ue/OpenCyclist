@@ -26,7 +26,6 @@ add_executable(OpenCyclist WIN32
     src/ble/heart_rate.cpp
     src/ble/link.cpp
     src/ble/zwift_ride.cpp
-    src/net/strava.cpp
     src/platform/settings.cpp
     src/ui/renderer.cpp
     src/ui/snapshot.cpp
@@ -35,17 +34,10 @@ add_executable(OpenCyclist WIN32
 set_source_files_properties(res/app.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico)
 target_compile_options(OpenCyclist PRIVATE /bigobj)
 target_link_libraries(OpenCyclist PRIVATE sim windowsapp kernel32 user32 shell32 ole32 dwmapi d2d1 dwrite
-                      windowscodecs ws2_32 winhttp crypt32 bcrypt delayimp)
-# Image encoding loads only for a snapshot, and networking only for Strava.
-target_link_options(OpenCyclist PRIVATE /DELAYLOAD:windowscodecs.dll /DELAYLOAD:ws2_32.dll /DELAYLOAD:winhttp.dll
-                    /DELAYLOAD:crypt32.dll /DELAYLOAD:bcrypt.dll)
+                      windowscodecs delayimp)
+# Image encoding loads only for a snapshot.
+target_link_options(OpenCyclist PRIVATE /DELAYLOAD:windowscodecs.dll)
 
-# Uploads to Strava need a Strava API app. Create one at https://www.strava.com/settings/api and pass its ID and
-# secret when configuring.
-set(STRAVA_CLIENT_ID "" CACHE STRING "Strava API app client ID")
-set(STRAVA_CLIENT_SECRET "" CACHE STRING "Strava API app client secret")
-set_source_files_properties(src/net/strava.cpp PROPERTIES COMPILE_DEFINITIONS
-    "STRAVA_CLIENT_ID=\"${STRAVA_CLIENT_ID}\";STRAVA_CLIENT_SECRET=\"${STRAVA_CLIENT_SECRET}\"")
 # Control-flow guard, shadow stack with checked exception continuations, and DLL imports from System32 only
 # (no planted DLLs next to the exe).
 target_link_options(OpenCyclist PRIVATE /GUARD:CF /GUARD:EHCONT /CETCOMPAT /DEPENDENTLOADFLAG:0x800)

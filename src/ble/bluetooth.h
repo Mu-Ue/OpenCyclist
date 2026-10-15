@@ -20,6 +20,7 @@ public:
         uint64_t address;
         Role role;
         std::wstring name;
+        ULONGLONG seen = 0;  // the last advert, by GetTickCount64
     };
 
     explicit Bluetooth(HWND window);
@@ -29,7 +30,8 @@ public:
 
     // Turns the radio on, or opens the Bluetooth settings when Windows won't let the app.
     void TurnOn() { TurnOnRadio(shared_); }
-    // Looks for devices while on. Each start forgets the list and looks afresh.
+    // Looks for devices while on. Each start forgets the list and looks afresh, and devices that stop advertising,
+    // such as a trainer gone to sleep, drop off it.
     void Scan(bool on);
     std::vector<Device> Nearby() const;
 

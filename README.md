@@ -21,37 +21,33 @@ Pick a distance, elevation gain and max grade. The course appears on the right. 
 
 Distance comes from your real power, so climbs take as long as they would outside.
 
-There are three modes. Sim uses virtual gears and makes climbs harder. ERG holds a target power. Resistance holds a fixed level.
+There are two modes. Sim uses virtual gears and makes climbs harder. ERG holds a target power.
 
-When the ride ends, a summary shows your time, distance, climbing, power and calories. Upload it to Strava from there. The first upload signs you in through the browser.
+End the ride with the End ride button, Esc or B, and confirm. A summary shows your time, distance, climbing, power and calories.
+
+Every ride is also saved as a TCX file. To get it into COROS, import it at [t.coros.com](https://t.coros.com) under Import Data. Garmin Connect and Strava take it too.
 
 | Key | Zwift Ride | Action |
 | --- | --- | --- |
-| ↑ → | Right shifters | Harder: gear up, +5 W or +5 % |
+| ↑ → | Right shifters | Harder: gear up or +5 W |
 | ↓ ← | Left shifters | Easier |
 | Shift, Page Up/Down | D-pad up/down | Big steps |
 | M | Y | Next mode |
 | Space | Z | Pause |
 | R | Hold A | New course, in the first 100 m |
 | D | B | Devices, from the setup screen |
-| Esc twice | Hold B | End the ride |
-| U | Y | Upload to Strava, on the summary |
+| Esc | B | End the ride, after a yes |
+| F | Y | Show the ride file, on the summary |
 | F11 | | Full screen |
 
 On the setup screen, the D-pad picks a setting, the shifters change it and A starts.
 
-On the devices screen, Enter or A connects or disconnects, R or Y refreshes and Esc or B continues.
+On the devices screen, Enter or A connects or disconnects and Esc or B continues.
 
-Every ride is saved as a CSV in `%APPDATA%\OpenCyclist\rides`.
+Rides are saved in `%APPDATA%\OpenCyclist\rides`.
 
 Options such as `--km 30 --gain 1000 --max-grade 10 --loop --mode erg --erg 200 --seed 12345` set up the course from the command line.
 
 ## Build from source
 
 Install Visual Studio 2022 with the C++ workload and the Windows 11 SDK, then run `build.bat`.
-
-Strava uploads need a Strava API app. Create one at [strava.com/settings/api](https://www.strava.com/settings/api) with `localhost` as the callback domain. Then build once with its ID and secret, which are remembered:
-
-```
-build.bat -DSTRAVA_CLIENT_ID=12345 -DSTRAVA_CLIENT_SECRET=your-secret
-```

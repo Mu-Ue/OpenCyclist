@@ -2,7 +2,7 @@
 
 #include "sim/course.h"
 
-enum class Mode { Sim, Erg, Resistance };
+enum class Mode { Sim, Erg };
 
 // What the trainer should do: hold a power (ERG) or a resistance level in percent of its range.
 struct TrainerTarget {
@@ -12,7 +12,7 @@ struct TrainerTarget {
 
 class Ride {
 public:
-    Ride(Course course, Mode mode, double massKg, int ergW, int resistancePct);
+    Ride(Course course, Mode mode, double massKg, int ergW);
 
     void OnPower(int watts) { power_ = watts; }
     void OnCadence(double rpm) { cadence_ = rpm; }
@@ -33,7 +33,6 @@ public:
     Mode mode() const { return mode_; }
     int gear() const { return gear_; }
     int ergW() const { return ergW_; }
-    int resistancePct() const { return resistancePct_; }
     int power() const { return power_; }
     double cadence() const { return cadence_; }
     int heartRate() const { return heartRate_; }
@@ -58,7 +57,7 @@ private:
     Course course_;
     Mode mode_;
     double mass_;
-    int ergW_, resistancePct_;
+    int ergW_;
     int gear_;
     int power_ = 0;
     double cadence_ = 0.0;

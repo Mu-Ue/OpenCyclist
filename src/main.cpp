@@ -37,8 +37,7 @@ void HardenProcess() {
 bool Snapshot(const Settings& settings) {
     CourseParams params = settings.course;
     if (!params.seed) params.seed = RandomSeed();
-    Ride ride(GenerateCourse(params), settings.mode, settings.riderKg + settings.bikeKg, settings.ergW,
-              settings.resistancePct);
+    Ride ride(GenerateCourse(params), settings.mode, settings.riderKg + kBikeKg, settings.ergW);
     ride.OnPower(230);
     ride.OnCadence(88);
     ride.OnHeartRate(142);

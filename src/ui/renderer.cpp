@@ -47,6 +47,13 @@ winrt::com_ptr<IDWriteTextFormat> MakeFormat(IDWriteFactory* dwrite, const std::
     return format;
 }
 
+// A round step near `raw`: 1, 2 or 5 times a power of ten.
+double NiceStep(double raw) {
+    const double power = std::pow(10.0, std::floor(std::log10(std::max(raw, 1e-6))));
+    const double f = raw / power;
+    return power * (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10);
+}
+
 D2D1_RECT_F Inset(D2D1_RECT_F r, float x, float y) { return {r.left + x, r.top + y, r.right - x, r.bottom - y}; }
 
 std::wstring Clock(double seconds) {
@@ -79,7 +86,6 @@ DevicesLayout LayoutDevices(D2D1_SIZE_F size, size_t nearby) {
     const float s = Scale(size), pad = 32.0f * s, right = size.width - pad, bottom = size.height - pad;
     DevicesLayout l;
     l.next = {right - 180.0f * s, bottom - 52.0f * s, right, bottom};
-    l.refresh = {l.next.left - 172.0f * s, l.next.top, l.next.left - 12.0f * s, bottom};
     l.banner = {pad, pad + 64.0f * s, right, pad + 120.0f * s};
     l.action = {right - 150.0f * s, l.banner.top + 10.0f * s, right - 10.0f * s, l.banner.bottom - 10.0f * s};
     const float gap = 16.0f * s, cardWidth = (right - pad - 2 * gap) / DevicesLayout::kCards;
@@ -103,8 +109,22 @@ SummaryLayout LayoutSummary(D2D1_SIZE_F size) {
     const float s = Scale(size), pad = 32.0f * s, right = size.width - pad, bottom = size.height - pad;
     SummaryLayout l;
     l.done = {right - 160.0f * s, bottom - 52.0f * s, right, bottom};
-    l.upload = {l.done.left - 232.0f * s, l.done.top, l.done.left - 12.0f * s, bottom};
-    l.signOut = {l.upload.left - 132.0f * s, l.done.top, l.upload.left - 12.0f * s, bottom};
+    l.file = {l.done.left - 172.0f * s, l.done.top, l.done.left - 12.0f * s, bottom};
+    return l;
+}
+
+D2D1_RECT_F LayoutRideEnd(D2D1_SIZE_F size) {
+    const float s = Scale(size, true), pad = 24.0f * s;
+    return {size.width - pad - 170.0f * s, size.height - pad - 76.0f * s, size.width - pad, size.height - pad};
+}
+
+ConfirmLayout LayoutConfirm(D2D1_SIZE_F size) {
+    const float s = Scale(size, true), w = 480.0f * s, h = 200.0f * s, in = 24.0f * s;
+    ConfirmLayout l;
+    l.box = {(size.width - w) / 2, (size.height - h) / 2, (size.width + w) / 2, (size.height + h) / 2};
+    const float mid = (l.box.left + l.box.right) / 2, top = l.box.bottom - in - 52.0f * s;
+    l.no = {l.box.left + in, top, mid - 6.0f * s, l.box.bottom - in};
+    l.yes = {mid + 6.0f * s, top, l.box.right - in, l.box.bottom - in};
     return l;
 }
 
@@ -182,7 +202,7 @@ void Renderer::DrawHeader(ID2D1RenderTarget* target, std::wstring_view title, st
               DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 
-void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_view status) {
+void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_view status, bool confirmEnd) {
     const float s = Prepare(target, true), pad = 24.0f * s, gap = 12.0f * s;
     const D2D1_SIZE_F size = target->GetSize();
 
@@ -196,11 +216,8 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     swprintf_s(grade, L"%.1f", ride.grade() * 100 + 0.0);  // + 0.0 turns -0.0 into 0.0
     const wchar_t* lastLabel = L"Gear";
     const wchar_t* lastUnit = L"";
-    switch (ride.mode()) {
-    case Mode::Sim: swprintf_s(last, L"%d", ride.gear()); break;
-    case Mode::Erg: swprintf_s(last, L"%d", ride.ergW()), lastLabel = L"ERG target", lastUnit = L"W"; break;
-    case Mode::Resistance: swprintf_s(last, L"%d", ride.resistancePct()), lastLabel = L"Resistance", lastUnit = L"%"; break;
-    }
+    if (ride.mode() == Mode::Erg) swprintf_s(last, L"%d", ride.ergW()), lastLabel = L"ERG target", lastUnit = L"W";
+    else swprintf_s(last, L"%d", ride.gear());
     struct Metric {
         std::wstring_view label, value, unit;
         ID2D1Brush* brush;
@@ -247,23 +264,26 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
 
     // The whole course.
     DrawCard(target, whole);
-    swprintf_s(caption, L"Course · seed %u", ride.course().params.seed);
-    DrawLabel(target, caption, label_.get(), {whole.left + 18.0f * s, whole.top + 10.0f * s, whole.right, whole.top + 34.0f * s},
+    DrawLabel(target, L"Course", label_.get(), {whole.left + 18.0f * s, whole.top + 10.0f * s, whole.right, whole.top + 34.0f * s},
               muted_.get());
     DrawProfile(target, ride.course(), 0.0, length, ride.distance(),
                 {whole.left + 18.0f * s, whole.top + 40.0f * s, whole.right - 18.0f * s, whole.bottom - 12.0f * s}, 50.0,
                 false);
 
-    // Progress, climbing, calories and time along the bottom.
-    wchar_t distance[48], climbed[48], kcal[32];
+    // Progress, climbing, power, calories and time along the bottom, and a button to end the ride.
+    wchar_t distance[48], climbed[48], avg[16], kcal[32];
     swprintf_s(distance, L"%.1f / %.1f", ride.distance() / 1000, length / 1000);
     swprintf_s(climbed, L"%.0f / %.0f", ride.climbed(), ride.course().targetGain);
+    swprintf_s(avg, L"%d", ride.averagePower());
     swprintf_s(kcal, L"%.0f", ride.calories());
     const std::wstring time = Clock(ride.elapsed());
-    const D2D1_RECT_F footer{pad, footerTop, size.width - pad, size.height - pad};
+    const D2D1_RECT_F end = LayoutRideEnd(size);
+    const D2D1_RECT_F footer{pad, footerTop, end.left - gap, size.height - pad};
     DrawCard(target, footer);
+    DrawButton(target, end, L"End ride", Button::Secondary, button_.get());
     const Metric totals[] = {{L"Distance", distance, L"km", text_.get()},
                              {L"Climbed", climbed, L"m", text_.get()},
+                             {L"Average power", avg, L"W", text_.get()},
                              {L"Calories", kcal, L"kcal", text_.get()},
                              {L"Time", time, L"", text_.get()}};
     const float statWidth = (footer.right - footer.left) / std::size(totals);
@@ -272,6 +292,22 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
         DrawStat(target, {x + 18.0f * s, footer.top + 10.0f * s, x + statWidth - 8.0f * s, footer.bottom - 8.0f * s},
                  totals[i].label, totals[i].value, totals[i].unit, 26.0f * s, totals[i].brush);
         if (i) target->DrawLine({x, footer.top + 16.0f * s}, {x, footer.bottom - 16.0f * s}, border_.get(), 1.0f);
+    }
+
+    // Ending the ride asks first, over a dimmed screen.
+    if (confirmEnd) {
+        background_->SetOpacity(0.75f);
+        target->FillRectangle({0, 0, size.width, size.height}, background_.get());
+        background_->SetOpacity(1.0f);
+        const ConfirmLayout c = LayoutConfirm(size);
+        DrawCard(target, c.box);
+        const float in = 24.0f * s;
+        DrawLabel(target, L"End the ride?", heading_.get(), {c.box.left + in, c.box.top + 20.0f * s, c.box.right - in, c.box.top + 56.0f * s},
+                  text_.get());
+        DrawLabel(target, L"It's saved, and the summary comes next.", small_.get(),
+                  {c.box.left + in, c.box.top + 60.0f * s, c.box.right - in, c.box.top + 90.0f * s}, muted_.get());
+        DrawButton(target, c.no, L"No, keep riding", Button::Secondary, button_.get());
+        DrawButton(target, c.yes, L"Yes, end it", Button::Primary, button_.get());
     }
 }
 
@@ -306,9 +342,7 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
     if (view.course) {
         const D2D1_RECT_F p = l.preview;
         DrawCard(target, p);
-        wchar_t caption[64];
-        swprintf_s(caption, L"Course · seed %u", view.course->params.seed);
-        DrawLabel(target, caption, label_.get(), {p.left + 20.0f * s, p.top + 12.0f * s, p.right, p.top + 36.0f * s},
+        DrawLabel(target, L"Course", label_.get(), {p.left + 20.0f * s, p.top + 12.0f * s, p.right, p.top + 36.0f * s},
                   muted_.get());
         // The numbers as chips along the bottom.
         float x = p.left + 20.0f * s;
@@ -347,7 +381,7 @@ void Renderer::DrawDevices(ID2D1RenderTarget* target, const DevicesView& view) {
     const float s = Prepare(target), pad = 32.0f * s, inset = 20.0f * s;
     const D2D1_SIZE_F size = target->GetSize();
     const DevicesLayout l = LayoutDevices(size, view.nearby.size());
-    DrawHeader(target, L"Devices", L"↑↓ choose · Enter connect or disconnect · R refresh · Esc continue · F11 full screen");
+    DrawHeader(target, L"Devices", L"↑↓ choose · Enter connect or disconnect · Esc continue · F11 full screen");
 
     // Bluetooth itself, with a button to fix it when it's off.
     const bool off = !view.action.empty();
@@ -375,15 +409,13 @@ void Renderer::DrawDevices(ID2D1RenderTarget* target, const DevicesView& view) {
         if (!d.name.empty()) DrawButton(target, b, L"Disconnect", Button::Secondary, small_.get());
     }
 
-    // Devices nearby, each a click away.
+    // Devices nearby, each a click away. The list keeps itself up to date.
     DrawLabel(target, L"Nearby", label_.get(), {pad, l.nearbyTop - 32.0f * s, size.width - pad, l.nearbyTop - 8.0f * s},
               muted_.get());
     if (view.nearby.empty()) {
         const D2D1_RECT_F empty{pad, l.nearbyTop, size.width - pad, l.nearbyTop + 64.0f * s};
         DrawCard(target, empty);
-        DrawLabel(target,
-                  view.searching ? L"Searching for trainers, Zwift Ride shifters and heart rate straps"
-                                 : L"Nothing new yet. Wake your trainer, Zwift Ride or heart rate strap and it shows up here.",
+        DrawLabel(target, L"Nothing new yet. Wake your trainer, Zwift Ride or heart rate strap and it shows up here.",
                   row_.get(), Inset(empty, inset, 0), muted_.get());
     }
     for (size_t i = 0; i < l.nearbyRows; ++i) {
@@ -397,8 +429,7 @@ void Renderer::DrawDevices(ID2D1RenderTarget* target, const DevicesView& view) {
         DrawButton(target, button, L"Connect", focused ? Button::Primary : Button::Secondary, small_.get());
     }
 
-    DrawLabel(target, view.footer, label_.get(), {pad, l.next.top, l.refresh.left - inset, l.next.bottom}, muted_.get());
-    DrawButton(target, l.refresh, view.refresh, Button::Secondary, button_.get());
+    DrawLabel(target, view.footer, label_.get(), {pad, l.next.top, l.next.left - inset, l.next.bottom}, muted_.get());
     DrawButton(target, l.next, L"Continue", Button::Primary, button_.get());
 }
 
@@ -445,24 +476,18 @@ void Renderer::DrawSummary(ID2D1RenderTarget* target, const SummaryView& view) {
     const D2D1_RECT_F course{pad, top + 2 * (cardHeight + gap), size.width - pad, l.done.top - 24.0f * s};
     DrawCard(target, course);
     wchar_t caption[64];
-    swprintf_s(caption, L"Course · %.1f km · seed %u", r.course().Length() / 1000, r.course().params.seed);
+    swprintf_s(caption, L"Course · %.1f km", r.course().Length() / 1000);
     DrawLabel(target, caption, label_.get(), {course.left + 20.0f * s, course.top + 12.0f * s, course.right, course.top + 36.0f * s},
               muted_.get());
     DrawProfile(target, r.course(), 0.0, r.course().Length(), r.distance(),
                 {course.left + 20.0f * s, course.top + 48.0f * s, course.right - 20.0f * s, course.bottom - 16.0f * s}, 50.0,
                 false);
 
-    // Strava along the bottom.
-    const float left = view.signOut ? l.signOut.left : l.upload.left;
-    if (!view.strava.empty()) {
-        DrawDot(target, {pad + 4.0f * s, (l.done.top + l.done.bottom) / 2}, view.stravaTone);
-        DrawLabel(target, view.strava, small_.get(), {pad + 16.0f * s, l.done.top, left - 16.0f * s, l.done.bottom},
-                  view.stravaTone == Tone::Problem ? warn_.get() : muted_.get());
-    }
-    if (view.signOut) DrawButton(target, l.signOut, L"Sign out", Button::Secondary, small_.get());
-    if (!view.upload.empty())
-        DrawButton(target, l.upload, view.upload, Button::Strava, button_.get(), view.uploadEnabled);
-    DrawButton(target, l.done, L"Done", view.upload.empty() ? Button::Primary : Button::Secondary, button_.get());
+    // Where the ride went, along the bottom.
+    const float left = view.file.empty() ? l.done.left : l.file.left;
+    DrawLabel(target, view.note, small_.get(), {pad, l.done.top, left - 16.0f * s, l.done.bottom}, muted_.get());
+    if (!view.file.empty()) DrawButton(target, l.file, view.file, Button::Secondary, button_.get());
+    DrawButton(target, l.done, L"Done", Button::Primary, button_.get());
 }
 
 void Renderer::DrawCard(ID2D1RenderTarget* target, D2D1_RECT_F box, bool focused) {
@@ -500,11 +525,14 @@ void Renderer::DrawStat(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring
     target->DrawTextLayout({box.left, box.top + 20.0f * s}, layout.get(), valueBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
-// An elevation profile from `from` to `to` metres. Flat stretches stay flat: the vertical scale covers at least
-// `minSpan` metres. A graded profile is colored by how steep the road is, with the ridden part dimmed. Otherwise
-// the ridden part is lit. A marker shows the rider, unless `position` is negative.
+// An elevation profile from `from` to `to` metres, with elevations up the left and distances along the bottom.
+// Flat stretches stay flat: the vertical scale covers at least `minSpan` metres. A graded profile is colored by how
+// steep the road is, with the ridden part dimmed. Otherwise the ridden part is lit. A marker shows the rider,
+// unless `position` is negative.
 void Renderer::DrawProfile(ID2D1RenderTarget* target, const Course& course, double from, double to, double position,
                            D2D1_RECT_F box, double minSpan, bool graded) {
+    const D2D1_RECT_F frame = box;
+    box = {box.left + 52.0f * scale_, box.top, box.right, box.bottom - 22.0f * scale_};
     const float width = box.right - box.left, height = box.bottom - box.top;
     if (to <= from || width < 2 || height < 2) return;
     const auto columns = static_cast<size_t>(std::max(2.0f, width / (graded ? 4.0f : 3.0f)));
@@ -519,6 +547,30 @@ void Renderer::DrawProfile(ID2D1RenderTarget* target, const Course& course, doub
     const double span = std::max(hi - lo, minSpan) * 1.12;
     const double base = (lo + hi) / 2 - span / 2;
     auto y = [&](double e) { return height - static_cast<float>((e - base) / span) * height; };
+
+    // Grid lines at round elevations, and ticks at round distances.
+    wchar_t tick[24];
+    const double rise = NiceStep(span / 4);
+    for (double e = std::ceil(base / rise) * rise; e <= base + span; e += rise) {
+        const float at = box.top + y(e);
+        target->DrawLine({box.left, at}, {box.right, at}, border_.get(), 1.0f);
+        swprintf_s(tick, L"%.0f m", std::round(e) + 0.0);  // + 0.0 turns -0 into 0
+        DrawLabel(target, tick, label_.get(), {frame.left, at - 10.0f * scale_, box.left - 8.0f * scale_, at + 10.0f * scale_},
+                  faint_.get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+    const double stride = NiceStep((to - from) / std::max(2.0f, width / (110.0f * scale_)));
+    const int decimals = stride >= 1000 ? 0 : stride >= 100 ? 1 : 2;
+    for (double d = std::ceil(from / stride) * stride; d <= to; d += stride) {
+        const float at = box.left + static_cast<float>((d - from) / (to - from)) * width;
+        if (at > box.right - 24.0f * scale_ && d < to) continue;  // leave the end's label room
+        target->DrawLine({at, box.bottom}, {at, box.bottom + 4.0f * scale_}, faint_.get(), 1.0f);
+        swprintf_s(tick, L"%.*f km", decimals, d / 1000);
+        // Centered under its tick, except at the very end, where it ends at the tick to stay in the card.
+        const bool last = at > box.right - 24.0f * scale_;
+        DrawLabel(target, tick, label_.get(),
+                  {at - 100.0f * scale_, box.bottom + 4.0f * scale_, at + (last ? 6.0f : 100.0f) * scale_, frame.bottom},
+                  faint_.get(), last ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
 
     // A filled shape under the columns from a to b, and the line along its top.
     auto shape = [&](size_t a, size_t b, bool closed) {

@@ -25,5 +25,8 @@ struct Course {
 // Builds a road-like profile. The same params always give the same course.
 Course GenerateCourse(const CourseParams& params);
 
+// The most a course can climb, from its length and max grade.
+double MaxGain(const CourseParams& params);
+
 // A fresh non-zero seed.
 uint32_t RandomSeed();

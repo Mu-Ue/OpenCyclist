@@ -15,9 +15,8 @@ double GearRatio(int gear) {
 
 }  // namespace
 
-Ride::Ride(Course course, Mode mode, double massKg, int ergW, int resistancePct)
-    : course_(std::move(course)), mode_(mode), mass_(massKg), ergW_(ergW), resistancePct_(resistancePct),
-      gear_(kStartGear) {}
+Ride::Ride(Course course, Mode mode, double massKg, int ergW)
+    : course_(std::move(course)), mode_(mode), mass_(massKg), ergW_(ergW), gear_(kStartGear) {}
 
 void Ride::Tick(double dt) {
     if (!paused_ && !finished_) {
@@ -64,23 +63,17 @@ void Ride::Adjust(int dir, bool big) {
         simTarget_ = SimPower();
         break;
     case Mode::Erg: ergW_ = std::clamp(ergW_ + dir * (big ? 25 : 5), 0, kMaxTargetW); break;
-    case Mode::Resistance: resistancePct_ = std::clamp(resistancePct_ + dir * (big ? 10 : 5), 0, 100); break;
     }
 }
 
 void Ride::NextMode() {
-    mode_ = mode_ == Mode::Sim ? Mode::Erg : mode_ == Mode::Erg ? Mode::Resistance : Mode::Sim;
+    mode_ = mode_ == Mode::Sim ? Mode::Erg : Mode::Sim;
 }
 
 TrainerTarget Ride::Target() const {
     using Kind = TrainerTarget::Kind;
     if (paused_ || finished_) return {Kind::Resistance, 0};
-    switch (mode_) {
-    case Mode::Sim: return {Kind::Power, static_cast<int>(std::lround(simTarget_))};
-    case Mode::Erg: return {Kind::Power, ergW_};
-    case Mode::Resistance: break;
-    }
-    return {Kind::Resistance, resistancePct_};
+    return {Kind::Power, mode_ == Mode::Erg ? ergW_ : static_cast<int>(std::lround(simTarget_))};
 }
 
 double EstimateTime(const Course& course, double massKg, int watts) {

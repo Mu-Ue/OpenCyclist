@@ -21,6 +21,7 @@ using winrt::Windows::Devices::Bluetooth::BluetoothAdapter;
 namespace {
 
 constexpr size_t kMaxNearby = 32;  // more than any room has, and a bound on what a flood of adverts can fill
+constexpr ULONGLONG kGoneMs = 15000;  // a device silent this long has left; devices advertise every second or so
 
 std::optional<Role> RoleOf(const adv::BluetoothLEAdvertisement& ad) {
     if (IsTrainer(ad)) return Role::Trainer;
@@ -120,20 +121,22 @@ void Bluetooth::Scan(bool on) {
         const uint64_t address = args.BluetoothAddress();
         std::wstring name = CleanName(ad.LocalName());
         const std::optional<Role> role = RoleOf(ad);
+        const ULONGLONG now = GetTickCount64();
+        bool changed;
         {
             std::lock_guard lock(shared->mutex);
             auto& list = shared->devices;
+            // Adverts from anything nearby arrive many times a second, so this keeps the list fresh.
+            changed = std::erase_if(list, [&](const Device& d) { return now - d.seen > kGoneMs; }) > 0;
             const auto it = std::find_if(list.begin(), list.end(), [&](const Device& d) { return d.address == address; });
             if (it == list.end()) {
-                if (!role || list.size() >= kMaxNearby) return;
-                list.push_back({address, *role, std::move(name)});
-            } else if (!name.empty() && name != it->name) {
-                it->name = std::move(name);
+                if (role && list.size() < kMaxNearby) list.push_back({address, *role, std::move(name), now}), changed = true;
             } else {
-                return;
+                it->seen = now;
+                if (!name.empty() && name != it->name) it->name = std::move(name), changed = true;
             }
         }
-        PostMessageW(shared->window, WM_NEARBY_CHANGED, 0, 0);
+        if (changed) PostMessageW(shared->window, WM_NEARBY_CHANGED, 0, 0);
     });
     try {
         watcher_.Start();

@@ -62,14 +62,12 @@ struct DevicesView {
     Tone radio = Tone::Waiting;
     std::wstring_view action;     // a button to fix the radio, such as "Turn on", or empty
     std::wstring_view footer;
-    std::wstring_view refresh = L"Refresh";  // the button, which shows a search under way
-    bool searching = false;                  // just refreshed
 };
 
 // Where the devices screen's parts are, in DIPs, for mouse hits.
 struct DevicesLayout {
     static constexpr size_t kCards = 3, kMaxNearby = 8;
-    D2D1_RECT_F banner{}, action{}, cards[kCards]{}, disconnect[kCards]{}, nearby[kMaxNearby]{}, refresh{}, next{};
+    D2D1_RECT_F banner{}, action{}, cards[kCards]{}, disconnect[kCards]{}, nearby[kMaxNearby]{}, next{};
     float nearbyTop = 0;
     size_t nearbyRows = 0;  // the rows that fit
 };
@@ -80,32 +78,37 @@ DevicesLayout LayoutDevices(D2D1_SIZE_F size, size_t nearby);
 struct SummaryView {
     const Ride* ride = nullptr;
     std::wstring_view title, date;
-    std::wstring_view strava;      // how the upload is going
-    Tone stravaTone = Tone::Waiting;
-    std::wstring_view upload;      // the Strava button, hidden when empty
-    bool uploadEnabled = true;
-    bool signOut = false;          // shows a button to sign out of Strava
+    std::wstring_view note;  // where the ride was saved
+    std::wstring_view file;  // the button to show the saved file, hidden when empty
 };
 
 struct SummaryLayout {
-    D2D1_RECT_F done{}, upload{}, signOut{};
+    D2D1_RECT_F done{}, file{};
 };
 
 SummaryLayout LayoutSummary(D2D1_SIZE_F size);
+
+// The ride screen's button to end the ride, and the question that follows, in DIPs.
+D2D1_RECT_F LayoutRideEnd(D2D1_SIZE_F size);
+struct ConfirmLayout {
+    D2D1_RECT_F box{}, yes{}, no{};
+};
+ConfirmLayout LayoutConfirm(D2D1_SIZE_F size);
 
 // Draws the screens into any Direct2D target: a window, or offscreen for a snapshot.
 class Renderer {
 public:
     explicit Renderer(IDWriteFactory* dwrite);
 
-    // Call between BeginDraw and EndDraw. `status` is shown when not empty, such as a lost trainer.
-    void Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_view status);
+    // Call between BeginDraw and EndDraw. `status` is shown when not empty, such as a lost trainer. `confirmEnd`
+    // asks whether to end the ride.
+    void Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_view status, bool confirmEnd = false);
     void DrawSetup(ID2D1RenderTarget* target, const SetupView& view);
     void DrawDevices(ID2D1RenderTarget* target, const DevicesView& view);
     void DrawSummary(ID2D1RenderTarget* target, const SummaryView& view);
 
 private:
-    enum class Button { Primary, Secondary, Strava };
+    enum class Button { Primary, Secondary };
 
     float Prepare(ID2D1RenderTarget* target, bool grow = false);
     void DrawHeader(ID2D1RenderTarget* target, std::wstring_view title, std::wstring_view hint);

@@ -8,6 +8,7 @@ constexpr double kAirDensity = 1.2;         // kg/m³
 constexpr double kCdA = 0.32;               // m², on the hoods
 constexpr double kCrr = 0.004;              // road tyres on asphalt
 constexpr double kDrivetrainLoss = 0.03;    // of pedal power
+constexpr double kBikeKg = 7.5;              // a carbon road bike
 constexpr double kWheelInertiaKg = 1.0;     // spinning wheels, as extra mass
 constexpr double kWheelCircumference = 2.105;  // m, 700x25c
 constexpr double kGrossEfficiency = 0.24;    // of food energy that reaches the pedals, for calories

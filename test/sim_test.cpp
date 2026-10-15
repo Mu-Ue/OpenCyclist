@@ -20,7 +20,7 @@ static void Check(bool ok, const char* what, const CourseParams& p, double value
 
 int main() {
     const double kms[] = {5, 30, 100, 200};
-    const double gains[] = {0, 150, 1000, 2500};
+    const double gains[] = {0, 150, 1000, 2500, 6000};
     const double maxGrades[] = {6, 10, 15};
     int courses = 0;
     for (uint32_t seed = 1; seed <= 40; ++seed)
@@ -58,7 +58,7 @@ int main() {
     if (climb < 11 || climb > 15) ++failures, std::printf("FAIL 8%% speed %.1f km/h\n", climb);
 
     // A whole ride at a steady 250 W, 84 kg, over 30 km with 1000 m of climbing.
-    Ride ride(GenerateCourse({30, 1000, 10, false, 7}), Mode::Erg, 84, 250, 0);
+    Ride ride(GenerateCourse({30, 1000, 10, false, 7}), Mode::Erg, 84, 250);
     ride.OnPower(250);
     ride.OnCadence(90);
     while (!ride.finished() && ride.elapsed() < 6 * 3600) ride.Tick(kTickMs / 1000.0);

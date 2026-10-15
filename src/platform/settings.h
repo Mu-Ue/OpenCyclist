@@ -15,9 +15,8 @@ struct SavedDevice {
 struct Settings {
     CourseParams course;
     Mode mode = Mode::Sim;
-    double riderKg = 75.0, bikeKg = 9.0;
+    double riderKg = 75.0;
     int ergW = 150;
-    int resistancePct = 30;
     SavedDevice devices[3];  // trainer, shifters and heart rate monitor, in ble::Role order
     std::wstring snapshot;  // --snapshot: render a ride to this PNG and quit. Not saved.
 };

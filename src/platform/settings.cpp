@@ -14,13 +14,12 @@ namespace {
 constexpr wchar_t kSection[] = L"ride";
 
 const wchar_t* ModeName(Mode mode) {
-    return mode == Mode::Erg ? L"erg" : mode == Mode::Resistance ? L"resistance" : L"sim";
+    return mode == Mode::Erg ? L"erg" : L"sim";
 }
 
 bool ParseMode(const wchar_t* s, Mode& mode) {
     if (!_wcsicmp(s, L"sim")) mode = Mode::Sim;
     else if (!_wcsicmp(s, L"erg")) mode = Mode::Erg;
-    else if (!_wcsicmp(s, L"resistance")) mode = Mode::Resistance;
     else return false;
     return true;
 }
@@ -79,9 +78,7 @@ Settings LoadSettings() {
     s.course.maxGradePct = ReadNumber(ini, L"max_grade", 2, 25, s.course.maxGradePct);
     s.course.loop = ReadNumber(ini, L"loop", 0, 1, 0) != 0;
     s.riderKg = ReadNumber(ini, L"rider_kg", 30, 200, s.riderKg);
-    s.bikeKg = ReadNumber(ini, L"bike_kg", 3, 40, s.bikeKg);
     s.ergW = static_cast<int>(ReadNumber(ini, L"erg_w", 0, 1500, s.ergW));
-    s.resistancePct = static_cast<int>(ReadNumber(ini, L"resistance", 0, 100, s.resistancePct));
     wchar_t buf[64];
     GetPrivateProfileStringW(kSection, L"mode", L"", buf, 64, ini.c_str());
     ParseMode(buf, s.mode);
@@ -102,9 +99,7 @@ void SaveSettings(const Settings& s) {
     WriteNumber(ini, L"max_grade", s.course.maxGradePct);
     WriteNumber(ini, L"loop", s.course.loop ? 1 : 0);
     WriteNumber(ini, L"rider_kg", s.riderKg);
-    WriteNumber(ini, L"bike_kg", s.bikeKg);
     WriteNumber(ini, L"erg_w", s.ergW);
-    WriteNumber(ini, L"resistance", s.resistancePct);
     WritePrivateProfileStringW(kSection, L"mode", ModeName(s.mode), ini.c_str());
     for (size_t i = 0; i < std::size(kDeviceKeys); ++i) {
         wchar_t buf[32];
@@ -146,6 +141,6 @@ bool ApplyArgs(Settings& s, const wchar_t* commandLine, std::wstring& error) {
     if (!ok)
         error +=
             L"Usage: OpenCyclist.exe [--km 30] [--gain 1000] [--max-grade 10] [--loop | --no-loop]\n"
-            L"[--mode sim|erg|resistance] [--erg 200] [--weight 75] [--seed 12345] [--snapshot file.png]";
+            L"[--mode sim|erg] [--erg 200] [--weight 75] [--seed 12345] [--snapshot file.png]";
     return ok;
 }

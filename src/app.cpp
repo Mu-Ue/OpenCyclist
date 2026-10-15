@@ -3,11 +3,13 @@
 #include <d2d1.h>
 #include <dwmapi.h>
 #include <dwrite.h>
+#include <shellapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -20,17 +22,17 @@
 #include "ble/heart_rate.h"
 #include "ble/zwift_ride.h"
 #include "config.h"
-#include "net/strava.h"
 #include "sim/course.h"
 #include "sim/ride.h"
+#include "sim/tcx.h"
 #include "ui/renderer.h"
 
 namespace {
 
 constexpr UINT_PTR kTimer = 1;
-constexpr ULONGLONG kConfirmMs = 3000;  // Esc ends a ride when pressed twice within this
+constexpr UINT_PTR kRepeatTimer = 2;
+constexpr UINT kRepeatDelayMs = 400, kRepeatMs = 60;  // a held setting starts stepping after the delay
 constexpr ULONGLONG kContinueMs = 3000;  // the devices screen shows all connected this long before moving on
-constexpr ULONGLONG kSearchMs = 4000;    // the Refresh button shows the search this long
 constexpr int kCards = static_cast<int>(ble::kRoleCount);  // the devices screen's first items, one per role
 
 std::wstring_view RoleName(ble::Role role) {
@@ -42,8 +44,8 @@ std::wstring_view RoleName(ble::Role role) {
     return {};
 }
 
-// The settings on the setup screen, top to bottom. Target shows only in the ERG and resistance modes.
-enum class Field { Km, Gain, MaxGrade, Route, Mode, Target, Rider, Bike };
+// The settings on the setup screen, top to bottom. Target shows only in ERG mode.
+enum class Field { Km, Gain, MaxGrade, Route, Mode, Target, Rider };
 
 // The next value up or down from v on a grid of `step`, so odd values from the ini snap onto it.
 double StepValue(double v, int dir, double step, double lo, double hi) {
@@ -71,12 +73,14 @@ private:
     void KeepRideSettings();
     void Start();
     void NewRide();
+    void AskToEnd();
     void EndRide();
     std::wstring Status() const;
 
     // The summary screen after a ride.
     void CloseSummary();
-    void UploadOrView();
+    void SaveTcx();
+    void ShowFile() const;
     void OnSummaryClick(D2D1_POINT_2F p);
 
     // The devices screen.
@@ -91,7 +95,6 @@ private:
     int Items() const;
     void Focus(int dir);
     void Act();
-    void Refresh();
     bool AllConnected() const;
     DeviceInfo Device(ble::Role role) const;
     void OnDevicesKey(WPARAM key);
@@ -103,6 +106,8 @@ private:
     void OnButtons(uint32_t pressed);
     bool Held(uint32_t button, ULONGLONG now);
     void OnTick();
+    void StartRepeat(Field field, int dir);
+    void StopRepeat();
 
     void UpdateTimer();
     void Paint();
@@ -124,22 +129,22 @@ private:
     bool fullscreen_ = false;
     WINDOWPLACEMENT placement_{sizeof(placement_)};
     int wheel_ = 0;  // wheel delta not yet turned into steps, for touchpads
+    Field repeatField_{};  // a setting held down with the mouse or the shifters, which keeps stepping
+    int repeatDir_ = 0;    // 0 when nothing is held
 
     Course course_;  // on the setup screen, and the one being ridden
     std::wstring stats_[3];  // the course's length, gain and rough time
     int selected_ = 0;
     std::unique_ptr<Ride> ride_;  // null on the setup and devices screens
-    ULONGLONG escAt_ = 0;
+    bool confirmEnd_ = false;  // asking whether to end the ride
     std::unique_ptr<Ride> done_;  // the ride just ended, which the summary screen shows when not null
-    std::wstring doneDate_, donePath_;
-    std::unique_ptr<Strava> strava_;
+    std::wstring doneDate_, donePath_;  // donePath_ is the ride as a TCX file, empty when it was too short
 
     bool devices_ = false;  // the devices screen shows instead of the setup screen
     std::vector<ble::Bluetooth::Device> nearby_;  // found nearby and not in use
     int focus_ = 0;  // on the devices screen: the cards, then the nearby devices
     bool autoContinue_ = false;  // move on by itself once the remembered devices connect
     ULONGLONG continueAt_ = 0;
-    ULONGLONG refreshedAt_ = 0;  // when Refresh was pressed, to show the search for a moment
 
     std::unique_ptr<ble::Bluetooth> bluetooth_;
     std::unique_ptr<ble::Trainer> trainer_;
@@ -151,12 +156,12 @@ private:
     double cadence_ = 0.0;
     int bpm_ = 0;
     uint32_t buttons_ = 0;
-    // Buttons that act once when held: A rerolls a ride that has just started, B ends a ride.
+    // Buttons that act once when held: A rerolls a ride that has just started.
     struct Hold {
         uint32_t button;
         ULONGLONG since = 0;
         bool done = true;
-    } holds_[2] = {{ble::button::kA}, {ble::button::kB}};
+    } holds_[1] = {{ble::button::kA}};
     ULONGLONG lastTick_ = 0;
     FILE* log_ = nullptr;
     std::wstring logPath_;  // the ride's log, once it has a row
@@ -213,7 +218,6 @@ int App::Run(HINSTANCE instance) {
     controllers_ = std::make_unique<ble::Controllers>(hwnd_, saved[1].address, saved[1].name);
     monitor_ = std::make_unique<ble::HeartRateMonitor>(hwnd_, saved[2].address, saved[2].name);
     bluetooth_ = std::make_unique<ble::Bluetooth>(hwnd_);
-    strava_ = std::make_unique<Strava>(hwnd_);
     ShowDevices();
     autoContinue_ = std::any_of(saved, saved + ble::kRoleCount, [](const SavedDevice& d) { return d.address != 0; });
     lastTick_ = GetTickCount64();
@@ -237,9 +241,18 @@ LRESULT CALLBACK App::Proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
     // After shutting down for a Windows sign-out, Bluetooth messages may still be queued.
-    if (closed_ && msg >= WM_APP && msg <= WM_STRAVA) return 0;
+    if (closed_ && msg >= WM_APP && msg <= ble::WM_NEARBY_CHANGED) return 0;
     switch (msg) {
     case WM_TIMER:
+        if (wParam == kRepeatTimer) {
+            if (!repeatDir_ || ride_ || devices_ || done_) {
+                StopRepeat();
+            } else {
+                Change(repeatField_, repeatDir_);
+                SetTimer(hwnd_, kRepeatTimer, kRepeatMs, nullptr);
+            }
+            return 0;
+        }
         OnTick();
         UpdateTimer();
         return 0;
@@ -257,9 +270,6 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!ride_ && !done_ && bpm_ != static_cast<int>(wParam)) Redraw();
         bpm_ = static_cast<int>(wParam);
         if (ride_ && ride_->heartRate() >= 0) ride_->OnHeartRate(bpm_);
-        return 0;
-    case WM_STRAVA:
-        if (done_) Redraw();
         return 0;
     case ble::WM_LINK_STATE:
         if (wParam < ble::kRoleCount) OnLinkState(static_cast<ble::Role>(wParam), static_cast<ble::Link::State>(lParam));
@@ -292,6 +302,13 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN:
         OnClick(ToDips({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}));
         UpdateTimer();
+        return 0;
+    case WM_LBUTTONUP:
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        StopRepeat();
+        return 0;
+    case WM_CAPTURECHANGED:
+        StopRepeat();
         return 0;
     case WM_MOUSEWHEEL: {
         POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -343,8 +360,8 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
 
 std::vector<Field> App::Fields() const {
     std::vector<Field> fields{Field::Km, Field::Gain, Field::MaxGrade, Field::Route, Field::Mode};
-    if (settings_.mode != Mode::Sim) fields.push_back(Field::Target);
-    fields.insert(fields.end(), {Field::Rider, Field::Bike});
+    if (settings_.mode == Mode::Erg) fields.push_back(Field::Target);
+    fields.push_back(Field::Rider);
     return fields;
 }
 
@@ -355,9 +372,8 @@ std::wstring_view App::Label(Field field) const {
     case Field::MaxGrade: return L"Max grade";
     case Field::Route: return L"Route";
     case Field::Mode: return L"Mode";
-    case Field::Target: return settings_.mode == Mode::Erg ? L"Target power" : L"Resistance";
+    case Field::Target: return L"Target power";
     case Field::Rider: return L"Rider weight";
-    case Field::Bike: return L"Bike weight";
     }
     return {};
 }
@@ -370,13 +386,9 @@ std::wstring App::Value(Field field) const {
     case Field::Gain: swprintf_s(buf, L"%g m", c.gainM); break;
     case Field::MaxGrade: swprintf_s(buf, L"%g %%", c.maxGradePct); break;
     case Field::Route: return c.loop ? L"Loop" : L"Point to point";
-    case Field::Mode: return settings_.mode == Mode::Sim ? L"Sim" : settings_.mode == Mode::Erg ? L"ERG" : L"Resistance";
-    case Field::Target:
-        if (settings_.mode == Mode::Erg) swprintf_s(buf, L"%d W", settings_.ergW);
-        else swprintf_s(buf, L"%d %%", settings_.resistancePct);
-        break;
+    case Field::Mode: return settings_.mode == Mode::Erg ? L"ERG" : L"Sim";
+    case Field::Target: swprintf_s(buf, L"%d W", settings_.ergW); break;
     case Field::Rider: swprintf_s(buf, L"%g kg", settings_.riderKg); break;
-    case Field::Bike: swprintf_s(buf, L"%g kg", settings_.bikeKg); break;
     }
     return buf;
 }
@@ -391,15 +403,9 @@ void App::Change(Field field, int dir) {
         break;
     case Field::MaxGrade: c.maxGradePct = StepValue(c.maxGradePct, dir, 1, 2, 25); break;
     case Field::Route: c.loop = !c.loop; break;
-    case Field::Mode: settings_.mode = static_cast<Mode>((static_cast<int>(settings_.mode) + dir + 3) % 3); break;
-    case Field::Target:
-        if (settings_.mode == Mode::Erg)
-            settings_.ergW = static_cast<int>(StepValue(settings_.ergW, dir, 5, 0, kMaxTargetW));
-        else
-            settings_.resistancePct = static_cast<int>(StepValue(settings_.resistancePct, dir, 5, 0, 100));
-        break;
+    case Field::Mode: settings_.mode = settings_.mode == Mode::Sim ? Mode::Erg : Mode::Sim; break;
+    case Field::Target: settings_.ergW = static_cast<int>(StepValue(settings_.ergW, dir, 5, 0, kMaxTargetW)); break;
     case Field::Rider: settings_.riderKg = StepValue(settings_.riderKg, dir, 1, 30, 200); break;
-    case Field::Bike: settings_.bikeKg = StepValue(settings_.bikeKg, dir, 0.5, 3, 40); break;
     }
     if (field <= Field::Route) MakeCourse();  // same seed, so the course keeps its character
     else Summarize();
@@ -411,8 +417,11 @@ void App::Select(int dir) {
     Redraw();
 }
 
+// The gain stops at what the course can climb, so the setting always shows what it gets.
 void App::MakeCourse() {
-    course_ = GenerateCourse(settings_.course);
+    CourseParams& c = settings_.course;
+    c.gainM = std::min(c.gainM, std::floor(MaxGain(c) / 10) * 10);
+    course_ = GenerateCourse(c);
     Summarize();
 }
 
@@ -421,7 +430,7 @@ void App::Summarize() {
     const int watts = settings_.mode == Mode::Erg && settings_.ergW >= 50
                           ? settings_.ergW
                           : static_cast<int>(std::lround(settings_.riderKg * 2.5 / 5)) * 5;
-    const int t = static_cast<int>(EstimateTime(course_, settings_.riderKg + settings_.bikeKg, watts));
+    const int t = static_cast<int>(EstimateTime(course_, settings_.riderKg + kBikeKg, watts));
     wchar_t buf[64];
     swprintf_s(buf, L"%.1f km", course_.Length() / 1000);
     stats_[0] = buf;
@@ -442,18 +451,16 @@ void App::Reroll() {
 void App::KeepRideSettings() {
     settings_.mode = ride_->mode();
     settings_.ergW = ride_->ergW();
-    settings_.resistancePct = ride_->resistancePct();
 }
 
 void App::Start() {
     SaveSettings(settings_);
-    ride_ = std::make_unique<Ride>(course_, settings_.mode, settings_.riderKg + settings_.bikeKg, settings_.ergW,
-                                   settings_.resistancePct);
+    ride_ = std::make_unique<Ride>(course_, settings_.mode, settings_.riderKg + kBikeKg, settings_.ergW);
     ride_->OnPower(power_);
     ride_->OnCadence(cadence_);
     ride_->OnHeartRate(Saved(ble::Role::HeartRate).address ? bpm_ : -1);
     for (Hold& h : holds_) h.done = true;  // a button still held from the setup screen doesn't act in the ride
-    escAt_ = 0;
+    confirmEnd_ = false;
     trainer_->SetTarget(ride_->Target());
     Redraw();
 }
@@ -468,22 +475,28 @@ void App::NewRide() {
     Start();
 }
 
-// A ride with a log moves on to its summary, and one that hardly began goes straight back to the setup.
+// Asks before ending, so a stray key or click doesn't lose the ride.
+void App::AskToEnd() {
+    confirmEnd_ = true;
+    Redraw();
+}
+
+// The ride moves on to its summary.
 void App::EndRide() {
     CloseLog();
+    SaveTcx();
     KeepRideSettings();
     SaveSettings(settings_);
-    if (!logPath_.empty()) {
+    confirmEnd_ = false;
+    {
         SYSTEMTIME st;
         GetLocalTime(&st);
         wchar_t date[64] = L"", time[32] = L"";
         GetDateFormatEx(L"en-US", 0, &st, L"dddd d MMMM", date, static_cast<int>(std::size(date)), nullptr);
         GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, nullptr, time, static_cast<int>(std::size(time)));
         doneDate_ = std::wstring(date) + L" · " + time;
-        donePath_ = std::move(logPath_);
         logPath_.clear();
         done_ = std::move(ride_);
-        strava_->Clear();
     }
     ride_.reset();
     selected_ = std::min(selected_, static_cast<int>(Fields().size()) - 1);  // the mode may have changed the rows
@@ -497,26 +510,34 @@ void App::CloseSummary() {
     Redraw();
 }
 
-// Uploads the ride, or once it's on Strava, opens it there.
-void App::UploadOrView() {
-    if (!Strava::Available()) return;
-    const Strava::Status s = strava_->status();
-    if (s.state == Strava::State::Uploaded) strava_->OpenActivity();
-    else strava_->Upload(donePath_);
-    Redraw();
+// The ride log as a TCX file next to it, which COROS, Garmin Connect, Strava and others import. COROS turns down
+// files under 20 KB, which is about a minute of riding.
+void App::SaveTcx() {
+    donePath_.clear();
+    if (logPath_.empty()) return;
+    std::ifstream in(logPath_, std::ios::binary);
+    const std::string tcx = RideToTcx(std::string(std::istreambuf_iterator<char>(in), {}));
+    if (tcx.empty()) return;
+    std::wstring path = logPath_.substr(0, logPath_.rfind(L'.')) + L".tcx";
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (out.write(tcx.data(), static_cast<std::streamsize>(tcx.size()))) donePath_ = std::move(path);
+}
+
+// Shows the ride's TCX file in File Explorer, ready to drag into an upload page.
+void App::ShowFile() const {
+    if (donePath_.empty()) return;
+    const std::wstring args = L"/select,\"" + donePath_ + L"\"";
+    ShellExecuteW(hwnd_, nullptr, L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
 }
 
 void App::OnSummaryClick(D2D1_POINT_2F p) {
     const SummaryLayout l = LayoutSummary(Size());
     auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
-    const Strava::Status s = strava_->status();
     if (inside(l.done)) CloseSummary();
-    else if (inside(l.upload) && s.state != Strava::State::Uploading) UploadOrView();
-    else if (inside(l.signOut) && s.signedIn && s.state != Strava::State::Uploading) strava_->SignOut();
+    else if (inside(l.file)) ShowFile();
 }
 
 std::wstring App::Status() const {
-    if (escAt_ && GetTickCount64() - escAt_ < kConfirmMs) return L"Esc again to end the ride";
     using S = ble::Link::State;
     if (radio_ == ble::Bluetooth::State::Off) return L"Bluetooth is off";
     if (!Saved(ble::Role::Trainer).address) return L"No trainer";
@@ -621,18 +642,6 @@ void App::Act() {
     UseDevice(d.role, d.address, d.name);
 }
 
-// Looks afresh for devices nearby, and retries the remembered ones that aren't connected.
-void App::Refresh() {
-    refreshedAt_ = GetTickCount64();
-    bluetooth_->Scan(true);
-    for (size_t i = 0; i < ble::kRoleCount; ++i) {
-        const auto role = static_cast<ble::Role>(i);
-        if (Saved(role).address && states_[i] != ble::Link::State::Connected)
-            LinkFor(role).Use(Saved(role).address, Saved(role).name);
-    }
-    Redraw();
-}
-
 bool App::AllConnected() const {
     bool any = false;
     for (size_t i = 0; i < ble::kRoleCount; ++i) {
@@ -653,7 +662,7 @@ DeviceInfo App::Device(ble::Role role) const {
     case S::Idle: info.status = saved.address ? L"Connecting" : L"Not set"; break;
     case S::Connecting: info.status = L"Connecting"; break;
     case S::NoBluetooth: info.status = L"Bluetooth is off", info.tone = Tone::Problem; break;
-    case S::Missing: info.status = L"Not found, is it awake?", info.tone = Tone::Problem; break;
+    case S::Missing: info.status = L"Not found yet, wake it up", info.tone = Tone::Problem; break;
     case S::Locked: info.status = L"Locked, unlock it in Zwift", info.tone = Tone::Problem; break;
     case S::Connected: {
         info.tone = Tone::Good;
@@ -679,7 +688,6 @@ void App::OnDevicesKey(WPARAM key) {
         if (radio_ == ble::Bluetooth::State::Off || radio_ == ble::Bluetooth::State::Missing) bluetooth_->TurnOn();
         else Act();
         break;
-    case 'R': Refresh(); break;
     case VK_ESCAPE:
     case 'D': ShowCourse(); break;
     }
@@ -689,7 +697,6 @@ void App::OnDevicesClick(D2D1_POINT_2F p) {
     const DevicesLayout l = LayoutDevices(Size(), nearby_.size());
     auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
     if (inside(l.next)) return ShowCourse();
-    if (inside(l.refresh)) return Refresh();
     if ((radio_ == ble::Bluetooth::State::Off || radio_ == ble::Bluetooth::State::Missing) && inside(l.action))
         return bluetooth_->TurnOn();
     // A card takes the focus, and its button disconnects. A nearby row connects anywhere on it.
@@ -712,7 +719,7 @@ void App::OnKey(WPARAM key) {
     if (key == VK_F11) return ToggleFullscreen();
     if (done_) {
         if (key == VK_RETURN || key == VK_ESCAPE || key == VK_SPACE) CloseSummary();
-        else if (key == 'U') UploadOrView();
+        else if (key == 'F') ShowFile();
         return;
     }
     if (!ride_ && devices_) {
@@ -735,6 +742,13 @@ void App::OnKey(WPARAM key) {
         return;
     }
 
+    // While asking whether to end the ride, Enter or Y ends it and Esc or N goes back to riding.
+    if (confirmEnd_) {
+        if (key == VK_RETURN || key == 'Y') EndRide();
+        else if (key == VK_ESCAPE || key == 'N') confirmEnd_ = false, Redraw();
+        return;
+    }
+
     // Up and right are harder, down and left easier. Shift and Page Up/Down take big steps.
     Ride& r = *ride_;
     const bool big = GetKeyState(VK_SHIFT) < 0;
@@ -754,16 +768,7 @@ void App::OnKey(WPARAM key) {
     case VK_RETURN:
         if (r.finished()) EndRide();
         return;
-    case VK_ESCAPE: {
-        // Ending a ride that is under way takes a second press, so a stray key doesn't lose it.
-        const ULONGLONG now = GetTickCount64();
-        if (r.finished() || r.distance() < kRerollBeforeM || (escAt_ && now - escAt_ < kConfirmMs)) {
-            EndRide();
-            return;
-        }
-        escAt_ = now;
-        break;
-    }
+    case VK_ESCAPE: AskToEnd(); return;
     default: return;
     }
     trainer_->SetTarget(r.Target());
@@ -771,7 +776,17 @@ void App::OnKey(WPARAM key) {
 }
 
 void App::OnClick(D2D1_POINT_2F p) {
-    if (ride_) return;
+    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    if (ride_) {
+        if (!confirmEnd_) {
+            if (inside(LayoutRideEnd(Size()))) AskToEnd();
+            return;
+        }
+        const ConfirmLayout c = LayoutConfirm(Size());
+        if (inside(c.yes)) EndRide();
+        else if (inside(c.no)) confirmEnd_ = false, Redraw();
+        return;
+    }
     if (done_) return OnSummaryClick(p);
     if (devices_) {
         autoContinue_ = false;
@@ -779,7 +794,6 @@ void App::OnClick(D2D1_POINT_2F p) {
     }
     const std::vector<Field> fields = Fields();
     const SetupLayout l = LayoutSetup(Size(), fields.size());
-    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
     if (inside(l.start)) return Start();
     if (inside(l.reroll)) return Reroll();
     if (inside(l.devices)) return ShowDevices();
@@ -788,7 +802,12 @@ void App::OnClick(D2D1_POINT_2F p) {
         selected_ = static_cast<int>(i);
         // The value's left half steps down and its right half up, where the arrows are.
         const float valueLeft = l.valueLeft(i);
-        if (p.x >= valueLeft) Change(fields[i], p.x < (valueLeft + l.rows[i].right) / 2 ? -1 : 1);
+        if (p.x >= valueLeft) {
+            const int dir = p.x < (valueLeft + l.rows[i].right) / 2 ? -1 : 1;
+            Change(fields[i], dir);
+            StartRepeat(fields[i], dir);
+            SetCapture(hwnd_);  // to hear the release outside the window too
+        }
         Redraw();
         return;
     }
@@ -813,10 +832,10 @@ void App::OnWheel(D2D1_POINT_2F p, int dir) {
     }
 }
 
-// On the devices screen the D-pad and shifters move, A connects or disconnects, Y refreshes and B moves on. On
+// On the devices screen the D-pad and shifters move, A connects or disconnects and B moves on. On
 // the setup screen the D-pad moves through the settings and the shifters change them; A starts and B goes back
 // to the devices. In a ride, right shifters go harder and left ones easier, like Zwift, and the D-pad moves in
-// big steps.
+// big steps, and B asks to end the ride.
 void App::OnButtons(uint32_t pressed) {
     namespace b = ble::button;
     const uint32_t down = pressed & ~buttons_;
@@ -825,9 +844,9 @@ void App::OnButtons(uint32_t pressed) {
     for (Hold& h : holds_)
         if (down & h.button) h.since = now, h.done = false;
 
-    // On the summary, A is done and Y uploads.
+    // On the summary, A is done and Y shows the file.
     if (!ride_ && done_) {
-        if (down & b::kY) UploadOrView();
+        if (down & b::kY) ShowFile();
         else if (down & (b::kA | b::kB)) CloseSummary();
         return;
     }
@@ -837,15 +856,21 @@ void App::OnButtons(uint32_t pressed) {
         if (down & (b::kUp | b::kLeft | b::kShiftUpLeft | b::kShiftDownLeft)) Focus(-1);
         if (down & (b::kDown | b::kRight | b::kShiftUpRight | b::kShiftDownRight)) Focus(+1);
         if (down & b::kA) Act();
-        if (down & b::kY) Refresh();
         if (down & b::kB) ShowCourse();
         return;
     }
     if (!ride_) {
+        constexpr uint32_t kHarder = b::kRight | b::kShiftUpRight | b::kShiftDownRight;
+        constexpr uint32_t kEasier = b::kLeft | b::kShiftUpLeft | b::kShiftDownLeft;
         if (down & b::kUp) Select(-1);
         if (down & b::kDown) Select(+1);
-        if (down & (b::kRight | b::kShiftUpRight | b::kShiftDownRight)) Change(Fields()[selected_], +1);
-        if (down & (b::kLeft | b::kShiftUpLeft | b::kShiftDownLeft)) Change(Fields()[selected_], -1);
+        for (const int dir : {+1, -1}) {
+            if (!(down & (dir > 0 ? kHarder : kEasier))) continue;
+            const Field field = Fields()[selected_];
+            Change(field, dir);
+            StartRepeat(field, dir);
+        }
+        if (repeatDir_ && !(pressed & (repeatDir_ > 0 ? kHarder : kEasier))) StopRepeat();
         if (down & b::kY) Reroll();
         if (down & b::kA) Start();
         if (down & b::kB) ShowDevices();
@@ -855,6 +880,12 @@ void App::OnButtons(uint32_t pressed) {
         if (down & b::kA) EndRide();
         return;
     }
+    if (confirmEnd_) {
+        if (down & b::kA) EndRide();
+        else if (down & b::kB) confirmEnd_ = false, Redraw();
+        return;
+    }
+    if (down & b::kB) return AskToEnd();
     if (down & (b::kShiftUpRight | b::kShiftDownRight)) ride_->Adjust(+1, false);
     if (down & (b::kShiftUpLeft | b::kShiftDownLeft)) ride_->Adjust(-1, false);
     if (down & b::kUp) ride_->Adjust(+1, true);
@@ -863,6 +894,19 @@ void App::OnButtons(uint32_t pressed) {
     if (down & b::kZ) ride_->TogglePause();
     trainer_->SetTarget(ride_->Target());
     Redraw();
+}
+
+// A held mouse button or shifter keeps stepping a number setting, after a moment. Held keys repeat by themselves.
+void App::StartRepeat(Field field, int dir) {
+    if (field == Field::Route || field == Field::Mode) return;  // toggles would flicker
+    repeatField_ = field;
+    repeatDir_ = dir;
+    SetTimer(hwnd_, kRepeatTimer, kRepeatDelayMs, nullptr);
+}
+
+void App::StopRepeat() {
+    if (repeatDir_) KillTimer(hwnd_, kRepeatTimer);
+    repeatDir_ = 0;
 }
 
 // True once when the button has been held long enough.
@@ -877,8 +921,7 @@ void App::OnTick() {
     const double dt = std::min((now - lastTick_) / 1000.0, 1.0);
     lastTick_ = now;
 
-    if (ride_ && Held(ble::button::kA, now) && ride_->distance() < kRerollBeforeM) NewRide();
-    if (ride_ && Held(ble::button::kB, now)) EndRide();
+    if (ride_ && !confirmEnd_ && Held(ble::button::kA, now) && ride_->distance() < kRerollBeforeM) NewRide();
     if (ride_) {
         ride_->Tick(dt);
         trainer_->SetTarget(ride_->Target());
@@ -900,13 +943,12 @@ void App::OnTick() {
     if (!IsIconic(hwnd_)) Redraw();
 }
 
-// The timer runs while something moves by itself: a ride, the countdown to the course or the search after Refresh.
-// Otherwise the window sleeps until something happens.
+// The timer runs while something moves by itself: a ride, or the countdown to the course. Otherwise the window
+// sleeps until something happens.
 void App::UpdateTimer() {
-    const bool searching = refreshedAt_ && GetTickCount64() - refreshedAt_ < kSearchMs;
     const bool counting = devices_ && !ride_ && !done_ && autoContinue_ && AllConnected();
     if (!counting) continueAt_ = 0;
-    const bool need = !closed_ && (ride_ || counting || (devices_ && !done_ && searching));
+    const bool need = !closed_ && (ride_ || counting);
     if (need == timer_) return;
     timer_ = need;
     if (need) {
@@ -914,7 +956,7 @@ void App::UpdateTimer() {
         SetTimer(hwnd_, kTimer, kTickMs, nullptr);
     } else {
         KillTimer(hwnd_, kTimer);
-        Redraw();  // the last frame, such as the Refresh button without its dots
+        Redraw();  // the last frame
     }
 }
 
@@ -936,51 +978,18 @@ void App::Paint() {
         DeviceInfo devices[ble::kRoleCount];
         for (size_t i = 0; i < ble::kRoleCount; ++i) devices[i] = Device(static_cast<ble::Role>(i));
         if (ride_) {
-            renderer_->Draw(target_.get(), *ride_, Status());
+            renderer_->Draw(target_.get(), *ride_, Status(), confirmEnd_);
         } else if (done_) {
-            const Strava::Status s = strava_->status();
             SummaryView view;
             view.ride = done_.get();
             view.title = done_->finished() ? L"Ride complete" : L"Ride ended";
             view.date = doneDate_;
-            std::wstring strava;
-            using S = Strava::State;
-            if (!Strava::Available()) {
-                strava = L"Saved to your rides folder";
+            if (donePath_.empty()) {
+                view.note = L"Too short to save as a file";
             } else {
-                switch (s.state) {
-                case S::SignedOut:
-                    strava = L"Saved. Upload to Strava signs you in through the browser.";
-                    view.upload = L"Upload to Strava";
-                    break;
-                case S::SigningIn:
-                    strava = L"Finish signing in to Strava in your browser";
-                    view.upload = L"Open sign-in again";
-                    break;
-                case S::Ready:
-                    strava = s.athlete.empty() ? L"Connected to Strava" : L"Connected to Strava as " + s.athlete;
-                    view.stravaTone = Tone::Good;
-                    view.upload = L"Upload to Strava";
-                    break;
-                case S::Uploading:
-                    strava = L"Uploading to Strava";
-                    view.upload = L"Uploading...";
-                    view.uploadEnabled = false;
-                    break;
-                case S::Uploaded:
-                    strava = L"Uploaded to Strava";
-                    view.stravaTone = Tone::Good;
-                    view.upload = L"View on Strava";
-                    break;
-                case S::Failed:
-                    strava = s.error;
-                    view.stravaTone = Tone::Problem;
-                    view.upload = L"Try again";
-                    break;
-                }
-                view.signOut = s.signedIn && s.state != S::Uploading;
+                view.note = L"Saved as a TCX file. Import it at t.coros.com, Garmin Connect or Strava.";
+                view.file = L"Show file";
             }
-            view.strava = strava;
             renderer_->DrawSummary(target_.get(), view);
         } else if (devices_) {
             std::vector<NearbyRow> nearby;
@@ -1015,13 +1024,6 @@ void App::Paint() {
                 wcscpy_s(footer, L"Connecting to your devices");
             }
             view.footer = footer;
-            // For a few seconds after Refresh the button counts dots, so the press visibly did something.
-            const ULONGLONG sinceRefresh = GetTickCount64() - refreshedAt_;
-            static constexpr std::wstring_view kSearching[] = {L"Searching.", L"Searching..", L"Searching..."};
-            if (refreshedAt_ && sinceRefresh < kSearchMs) {
-                view.searching = true;
-                view.refresh = kSearching[sinceRefresh / 400 % 3];
-            }
             renderer_->DrawDevices(target_.get(), view);
         } else {
             std::vector<SetupRow> rows;
@@ -1101,7 +1103,7 @@ void App::WriteLog() {
         std::fprintf(log_, "time_s,distance_m,elevation_m,grade_pct,power_w,cadence_rpm,speed_kmh,mode,gear,target,"
                            "heart_rate_bpm\n");
     }
-    static const char* const kModes[] = {"sim", "erg", "resistance"};
+    static const char* const kModes[] = {"sim", "erg"};
     const Ride& r = *ride_;
     std::fprintf(log_, "%.0f,%.1f,%.1f,%.1f,%d,%.0f,%.1f,%s,%d,%d,%d\n", r.elapsed(), r.distance(), r.elevation(),
                  r.grade() * 100, r.power(), r.cadence(), r.speed() * 3.6, kModes[static_cast<int>(r.mode())], r.gear(),
@@ -1119,6 +1121,7 @@ void App::Shutdown() {
     if (closed_) return;
     closed_ = true;
     KillTimer(hwnd_, kTimer);
+    StopRepeat();
     timer_ = false;
     CloseLog();
     // Release the trainer before the window goes, so it isn't left holding a power target.
@@ -1126,7 +1129,6 @@ void App::Shutdown() {
     controllers_.reset();
     monitor_.reset();
     bluetooth_.reset();
-    strava_.reset();
     if (ride_) KeepRideSettings();
     SaveSettings(settings_);
 }

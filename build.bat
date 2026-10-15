@@ -11,7 +11,7 @@ if not defined VS (
 set "PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%"
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 
-rem Arguments, such as -DSTRAVA_CLIENT_ID=12345, go to CMake and stick for later builds.
+rem Arguments go to CMake and stick for later builds.
 set "CONFIGURE="
 if not exist build\build.ninja set "CONFIGURE=1"
 if not "%~1"=="" set "CONFIGURE=1"

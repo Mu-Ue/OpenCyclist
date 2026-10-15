@@ -9,6 +9,14 @@
 
 namespace {
 
+// Climbs and descents share the length, so together they can't beat the max grade over all of it. This leaves
+// headroom so the climbs aren't one long wall at the max grade.
+constexpr double kHeadroom = 0.6;
+
+size_t Steps(const CourseParams& params) {
+    return std::max<size_t>(1, static_cast<size_t>(std::lround(params.km * 1000.0 / kCourseStep)));
+}
+
 // SplitMix64: tiny, fast, and gives the same numbers on every compiler, unlike the std distributions.
 struct Rng {
     uint64_t state;
@@ -86,6 +94,11 @@ void FitTotals(std::vector<double>& g, double gain, double descent, double maxGr
 
 }  // namespace
 
+double MaxGain(const CourseParams& params) {
+    const double length = static_cast<double>(Steps(params)) * kCourseStep;
+    return length * std::clamp(params.maxGradePct, 1.0, 25.0) / 100.0 * kHeadroom / (params.loop ? 2.0 : 1.0);
+}
+
 double Course::Length() const { return elevation.size() < 2 ? 0.0 : (elevation.size() - 1) * kCourseStep; }
 
 double Course::ElevationAt(double distance) const {
@@ -113,15 +126,16 @@ uint32_t RandomSeed() { return std::random_device{}() | 1u; }
 Course GenerateCourse(const CourseParams& params) {
     Course course;
     course.params = params;
-    const size_t n = std::max<size_t>(1, static_cast<size_t>(std::lround(params.km * 1000.0 / kCourseStep)));
+    const size_t n = Steps(params);
     const double length = static_cast<double>(n) * kCourseStep;
     const double maxGrade = std::clamp(params.maxGradePct, 1.0, 25.0) / 100.0;
     Rng rng{params.seed};
 
-    // Climbs and descents share the length, so together they can't beat the max grade over all of it. Leave
-    // headroom so the climbs aren't one long wall at the max grade.
-    const double descentShare = params.loop ? 1.0 : rng.Uniform(0.3, 1.0);
-    const double gain = std::clamp(params.gainM, 0.0, length * maxGrade * 0.5 / (1.0 + descentShare));
+    // A point-to-point course too hilly for its descents ends higher up instead, so all of the gain fits.
+    double descentShare = params.loop ? 1.0 : rng.Uniform(0.3, 1.0);
+    const double gain = std::clamp(params.gainM, 0.0, MaxGain(params));
+    if (!params.loop && gain > 0.0)
+        descentShare = std::clamp(length * maxGrade * kHeadroom / gain - 1.0, 0.0, descentShare);
     const double descent = gain * descentShare;
     course.targetGain = gain;
 
