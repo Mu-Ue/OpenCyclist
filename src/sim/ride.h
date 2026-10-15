@@ -16,6 +16,7 @@ public:
 
     void OnPower(int watts) { power_ = watts; }
     void OnCadence(double rpm) { cadence_ = rpm; }
+    void OnHeartRate(int bpm) { heartRate_ = bpm; }  // -1 without a heart rate monitor, 0 when it has nothing
     void ClearInputs() { power_ = 0; cadence_ = 0.0; }
 
     void Tick(double dt);
@@ -35,6 +36,7 @@ public:
     int resistancePct() const { return resistancePct_; }
     int power() const { return power_; }
     double cadence() const { return cadence_; }
+    int heartRate() const { return heartRate_; }
     double speed() const { return speed_; }  // m/s
     double distance() const { return distance_; }
     double elevation() const { return course_.ElevationAt(distance_); }
@@ -52,6 +54,7 @@ private:
     int gear_;
     int power_ = 0;
     double cadence_ = 0.0;
+    int heartRate_ = -1;
     double speed_ = 0.0, distance_ = 0.0, climbed_ = 0.0, elapsed_ = 0.0;
     double simTarget_ = 0.0;
     bool paused_ = false, finished_ = false;

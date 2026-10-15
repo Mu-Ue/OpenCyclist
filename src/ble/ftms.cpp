@@ -23,76 +23,38 @@ constexpr uint8_t kRequestControl = 0x00, kReset = 0x01, kSetResistance = 0x04, 
 
 constexpr ULONGLONG kDataTimeoutMs = 10000;  // trainers send bike data every second, even when idle
 
-bool LooksLikeTrainer(const adv::BluetoothLEAdvertisement& ad) {
-    for (const auto& id : ad.ServiceUuids())
-        if (id == kFtmsService) return true;
-    // Some trainers only list their own services in the advert.
-    return std::wstring_view(ad.LocalName()).starts_with(L"KICKR");
-}
-
 bool SameTarget(TrainerTarget a, TrainerTarget b) {
     return a.kind == b.kind && std::abs(a.value - b.value) < (a.kind == TrainerTarget::Kind::Power ? 2 : 1);
 }
 
 }  // namespace
 
-Trainer::Trainer(HWND window, uint64_t address) : window_(window), address_(address) { Run(); }
-
-Trainer::~Trainer() {
-    stop_ = true;
-    SetEvent(wake_.get());
-    WaitForSingleObject(done_.get(), 5000);
+bool IsTrainer(const adv::BluetoothLEAdvertisement& ad) {
+    for (const auto& id : ad.ServiceUuids())
+        if (id == kFtmsService) return true;
+    // Some trainers only list their own services in the advert.
+    return std::wstring_view(ad.LocalName()).starts_with(L"KICKR");
 }
+
+Trainer::Trainer(HWND window, uint64_t address, std::wstring name)
+    : Link(window, Role::Trainer, IsTrainer, address, std::move(name)) {
+    Start();
+}
+
+Trainer::~Trainer() { Stop(); }
 
 void Trainer::SetTarget(TrainerTarget target) {
     std::lock_guard lock(mutex_);
     target_ = target;
 }
 
-winrt::fire_and_forget Trainer::Run() {
-    co_await winrt::resume_background();
-    while (!stop_) {
-        try {
-            co_await Session();
-        } catch (...) {
-            // A dropped connection surfaces as an exception from whichever call was in flight. Start over.
-        }
-        if (stop_) break;
-        Post(WM_TRAINER_STATE, static_cast<WPARAM>(State::Searching));
-        co_await winrt::resume_on_signal(wake_.get(), 2s);
-    }
-    SetEvent(done_.get());
-}
-
-IAsyncAction Trainer::Session() {
-    if (!co_await RadioOn()) {
-        Post(WM_TRAINER_STATE, static_cast<WPARAM>(State::NoBluetooth));
-        co_await winrt::resume_on_signal(wake_.get(), 3s);
-        co_return;
-    }
-    Post(WM_TRAINER_STATE, static_cast<WPARAM>(State::Searching));
-
-    // Try the saved trainer first. If it keeps failing, it may be a different one now, so scan.
-    uint64_t address = address_;
-    if (address == 0 || failures_ >= 2) {
-        address = co_await Scan(LooksLikeTrainer, 10s, wake_.get());
-        if (address == 0) co_return;
-        failures_ = 0;
-    }
-
-    Connection link;
-    link.device = co_await BluetoothLEDevice::FromBluetoothAddressAsync(address);
-    if (link.device) link.service = co_await FindService(link.device, kFtmsService);
-    if (!link.service) {
-        ++failures_;
-        co_return;
-    }
-    failures_ = 0;
-    address_ = address;
+IAsyncOperation<bool> Trainer::Session(Connection& link) {
+    link.service = co_await FindService(link.device, kFtmsService);
+    if (!link.service) co_return false;
 
     const auto data = co_await FindCharacteristic(link.service, kIndoorBikeData);
     const auto control = co_await FindCharacteristic(link.service, kControlPoint);
-    if (!data || !control) co_return;
+    if (!data || !control) co_return true;
 
     // Resistance range: min, max (sint16) and step (uint16), in 0.1 units.
     if (const auto range = co_await FindCharacteristic(link.service, kResistanceRange)) {
@@ -107,16 +69,16 @@ IAsyncAction Trainer::Session() {
     const auto dataRevoker = data.ValueChanged(winrt::auto_revoke, [this](const auto&, const gatt::GattValueChangedEventArgs& args) {
         OnBikeData(args.CharacteristicValue());
     });
-    if (!co_await Subscribe(data, Cccd::Notify) || !co_await Subscribe(control, Cccd::Indicate)) co_return;
-    if (!co_await Write(control, {kRequestControl}, true)) co_return;
+    if (!co_await Subscribe(data, Cccd::Notify) || !co_await Subscribe(control, Cccd::Indicate)) co_return true;
+    if (!co_await Write(control, {kRequestControl}, true)) co_return true;
     co_await Write(control, {kStart}, true);
 
     lastData_ = GetTickCount64();
-    Post(WM_TRAINER_STATE, static_cast<WPARAM>(State::Connected));
+    SetState(State::Connected);
 
     bool sent = false;
     TrainerTarget last;
-    while (!stop_ && Connected(link.device) && GetTickCount64() - lastData_ < kDataTimeoutMs) {
+    while (!Changed() && Connected(link.device) && GetTickCount64() - lastData_ < kDataTimeoutMs) {
         TrainerTarget target;
         {
             std::lock_guard lock(mutex_);
@@ -126,10 +88,11 @@ IAsyncAction Trainer::Session() {
             sent = co_await Send(control, target);
             last = target;
         }
-        co_await winrt::resume_on_signal(wake_.get(), std::chrono::milliseconds(kTickMs));
+        co_await winrt::resume_on_signal(Wake(), std::chrono::milliseconds(kTickMs));
     }
-    // Hand the trainer back free-wheeling.
-    if (stop_) co_await Write(control, {kReset}, true);
+    // Hand the trainer back free-wheeling when the app closes or switches to another one.
+    if (Changed()) co_await Write(control, {kReset}, true);
+    co_return true;
 }
 
 IAsyncOperation<bool> Trainer::Send(gatt::GattCharacteristic control, TrainerTarget target) {

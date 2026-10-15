@@ -14,6 +14,17 @@ winrt::guid ShortUuid(uint16_t id) {
     return winrt::guid{0x00000000u | id, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
 }
 
+std::wstring CleanName(std::wstring_view name) {
+    constexpr size_t kMaxLength = 48;
+    std::wstring clean;
+    for (const wchar_t c : name) {
+        if (clean.size() == kMaxLength) break;
+        if (c >= 0x20 && c != 0x7F) clean += c;
+    }
+    while (!clean.empty() && clean.back() == L' ') clean.pop_back();
+    return clean;
+}
+
 IAsyncOperation<bool> RadioOn() {
     const auto adapter = co_await BluetoothAdapter::GetDefaultAsync();
     if (!adapter || !adapter.IsLowEnergySupported()) co_return false;

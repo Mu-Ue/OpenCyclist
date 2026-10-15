@@ -2,10 +2,10 @@
 
 #include <windows.h>
 
-#include <atomic>
 #include <cstdint>
+#include <string>
 
-#include "ble/common.h"
+#include "ble/link.h"
 
 namespace ble {
 
@@ -17,28 +17,20 @@ constexpr uint32_t kShiftUpLeft = 0x0100, kShiftDownLeft = 0x0200, kShiftUpRight
 constexpr uint32_t kPowerUpLeft = 0x0400, kPowerUpRight = 0x4000, kOnOffLeft = 0x0800, kOnOffRight = 0x8000;
 }  // namespace button
 
-// The Zwift Ride's two controllers. The left one connects and relays the right one's buttons. Posts the pressed
-// buttons to the window whenever they change.
-class Controllers {
-public:
-    // Locked: newer Ride firmware hides the controller service until it's unlocked in Zwift.
-    enum class State { Searching, Connected, Locked };
+// Whether an advert is the Zwift Ride's left controller, the one that connects.
+bool IsRideLeft(const adv::BluetoothLEAdvertisement& ad);
 
-    explicit Controllers(HWND window);
+// The Zwift Ride's two controllers. The left one connects and relays the right one's buttons. Posts the pressed
+// buttons to the window whenever they change. Newer Ride firmware hides the controller service until it's
+// unlocked in Zwift, which shows as State::Locked.
+class Controllers : public Link {
+public:
+    Controllers(HWND window, uint64_t address, std::wstring name);
     ~Controllers();
-    Controllers(const Controllers&) = delete;
-    Controllers& operator=(const Controllers&) = delete;
 
 private:
-    winrt::fire_and_forget Run();
-    IAsyncAction Session();
+    IAsyncOperation<bool> Session(Connection& link) override;
     void OnMessage(const winrt::Windows::Storage::Streams::IBuffer& data);
-    void Post(UINT message, WPARAM w, LPARAM l = 0) const { PostMessageW(window_, message, w, l); }
-
-    HWND window_;
-    std::atomic<bool> stop_{false};
-    winrt::handle wake_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
-    winrt::handle done_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
 };
 
 }  // namespace ble

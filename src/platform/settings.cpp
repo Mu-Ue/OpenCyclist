@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
+#include <iterator>
 
 namespace {
 
@@ -32,6 +33,10 @@ bool ParseNumber(const wchar_t* s, double lo, double hi, double& out) {
     out = v;
     return true;
 }
+
+// The address and name keys of each saved device.
+constexpr const wchar_t* kDeviceKeys[][2] = {
+    {L"trainer", L"trainer_name"}, {L"shifters", L"shifters_name"}, {L"heart_rate", L"heart_rate_name"}};
 
 std::wstring IniPath() { return AppDataDir() + L"\\settings.ini"; }
 
@@ -80,8 +85,13 @@ Settings LoadSettings() {
     wchar_t buf[64];
     GetPrivateProfileStringW(kSection, L"mode", L"", buf, 64, ini.c_str());
     ParseMode(buf, s.mode);
-    GetPrivateProfileStringW(kSection, L"trainer", L"", buf, 64, ini.c_str());
-    s.trainer = _wcstoui64(buf, nullptr, 16);
+    for (size_t i = 0; i < std::size(kDeviceKeys); ++i) {
+        GetPrivateProfileStringW(kSection, kDeviceKeys[i][0], L"", buf, 64, ini.c_str());
+        s.devices[i].address = _wcstoui64(buf, nullptr, 16);
+        wchar_t name[64];
+        GetPrivateProfileStringW(kSection, kDeviceKeys[i][1], L"", name, 64, ini.c_str());
+        if (s.devices[i].address) s.devices[i].name = name;
+    }
     return s;
 }
 
@@ -96,9 +106,12 @@ void SaveSettings(const Settings& s) {
     WriteNumber(ini, L"erg_w", s.ergW);
     WriteNumber(ini, L"resistance", s.resistancePct);
     WritePrivateProfileStringW(kSection, L"mode", ModeName(s.mode), ini.c_str());
-    wchar_t buf[32];
-    swprintf_s(buf, L"%llX", static_cast<unsigned long long>(s.trainer));
-    WritePrivateProfileStringW(kSection, L"trainer", buf, ini.c_str());
+    for (size_t i = 0; i < std::size(kDeviceKeys); ++i) {
+        wchar_t buf[32];
+        swprintf_s(buf, L"%llX", static_cast<unsigned long long>(s.devices[i].address));
+        WritePrivateProfileStringW(kSection, kDeviceKeys[i][0], buf, ini.c_str());
+        WritePrivateProfileStringW(kSection, kDeviceKeys[i][1], s.devices[i].name.c_str(), ini.c_str());
+    }
 }
 
 bool ApplyArgs(Settings& s, const wchar_t* commandLine, std::wstring& error) {

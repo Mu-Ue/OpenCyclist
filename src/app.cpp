@@ -15,7 +15,9 @@
 
 #include <winrt/base.h>
 
+#include "ble/bluetooth.h"
 #include "ble/ftms.h"
+#include "ble/heart_rate.h"
 #include "ble/zwift_ride.h"
 #include "config.h"
 #include "sim/course.h"
@@ -26,6 +28,18 @@ namespace {
 
 constexpr UINT_PTR kTimer = 1;
 constexpr ULONGLONG kConfirmMs = 3000;  // Esc ends a ride when pressed twice within this
+constexpr ULONGLONG kContinueMs = 3000;  // the devices screen shows all connected this long before moving on
+constexpr ULONGLONG kSearchMs = 4000;    // the Refresh button shows the search this long
+constexpr int kCards = static_cast<int>(ble::kRoleCount);  // the devices screen's first items, one per role
+
+std::wstring_view RoleName(ble::Role role) {
+    switch (role) {
+    case ble::Role::Trainer: return L"Trainer";
+    case ble::Role::Shifters: return L"Shifters";
+    case ble::Role::HeartRate: return L"Heart rate";
+    }
+    return {};
+}
 
 // The settings on the setup screen, top to bottom. Target shows only in the ERG and resistance modes.
 enum class Field { Km, Gain, MaxGrade, Route, Mode, Target, Rider, Bike };
@@ -59,6 +73,24 @@ private:
     void EndRide();
     std::wstring Status() const;
 
+    // The devices screen.
+    void ShowDevices();
+    void ShowCourse();
+    ble::Link& LinkFor(ble::Role role);
+    SavedDevice& Saved(ble::Role role) { return settings_.devices[static_cast<size_t>(role)]; }
+    const SavedDevice& Saved(ble::Role role) const { return settings_.devices[static_cast<size_t>(role)]; }
+    void UseDevice(ble::Role role, uint64_t address, std::wstring name);
+    void OnLinkState(ble::Role role, ble::Link::State state);
+    void UpdateNearby();
+    int Items() const;
+    void Focus(int dir);
+    void Act();
+    void Refresh();
+    bool AllConnected() const;
+    DeviceInfo Device(ble::Role role) const;
+    void OnDevicesKey(WPARAM key);
+    void OnDevicesClick(D2D1_POINT_2F p);
+
     void OnKey(WPARAM key);
     void OnClick(D2D1_POINT_2F p);
     void OnWheel(D2D1_POINT_2F p, int dir);
@@ -89,15 +121,25 @@ private:
     Course course_;  // on the setup screen, and the one being ridden
     std::wstring summary_;
     int selected_ = 0;
-    std::unique_ptr<Ride> ride_;  // null on the setup screen
+    std::unique_ptr<Ride> ride_;  // null on the setup and devices screens
     ULONGLONG escAt_ = 0;
 
+    bool devices_ = false;  // the devices screen shows instead of the setup screen
+    std::vector<ble::Bluetooth::Device> nearby_;  // found nearby and not in use
+    int focus_ = 0;  // on the devices screen: the cards, then the nearby devices
+    bool autoContinue_ = false;  // move on by itself once the remembered devices connect
+    ULONGLONG continueAt_ = 0;
+    ULONGLONG refreshedAt_ = 0;  // when Refresh was pressed, to show the search for a moment
+
+    std::unique_ptr<ble::Bluetooth> bluetooth_;
     std::unique_ptr<ble::Trainer> trainer_;
     std::unique_ptr<ble::Controllers> controllers_;
-    ble::Trainer::State trainerState_ = ble::Trainer::State::Searching;
-    ble::Controllers::State controllerState_ = ble::Controllers::State::Searching;
+    std::unique_ptr<ble::HeartRateMonitor> monitor_;
+    ble::Bluetooth::State radio_ = ble::Bluetooth::State::Unknown;
+    ble::Link::State states_[ble::kRoleCount]{};
     int power_ = 0;
     double cadence_ = 0.0;
+    int bpm_ = 0;
     uint32_t buttons_ = 0;
     // Buttons that act once when held: A rerolls a ride that has just started, B ends a ride.
     struct Hold {
@@ -148,8 +190,15 @@ int App::Run(HINSTANCE instance) {
 
     if (!settings_.course.seed) settings_.course.seed = RandomSeed();
     MakeCourse();
-    trainer_ = std::make_unique<ble::Trainer>(hwnd_, settings_.trainer);
-    controllers_ = std::make_unique<ble::Controllers>(hwnd_);
+    const SavedDevice* saved = settings_.devices;
+    bluetooth_ = std::make_unique<ble::Bluetooth>(hwnd_);
+    trainer_ = std::make_unique<ble::Trainer>(hwnd_, saved[0].address, saved[0].name);
+    controllers_ = std::make_unique<ble::Controllers>(hwnd_, saved[1].address, saved[1].name);
+    monitor_ = std::make_unique<ble::HeartRateMonitor>(hwnd_, saved[2].address, saved[2].name);
+    // Start on the devices screen. Remembered devices connect by themselves, and once they all have, the
+    // course screen follows.
+    ShowDevices();
+    autoContinue_ = std::any_of(saved, saved + ble::kRoleCount, [](const SavedDevice& d) { return d.address != 0; });
     lastTick_ = GetTickCount64();
     SetTimer(hwnd_, kTimer, kTickMs, nullptr);
     ShowWindow(hwnd_, SW_SHOWDEFAULT);
@@ -172,7 +221,7 @@ LRESULT CALLBACK App::Proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
     // After shutting down for a Windows sign-out, Bluetooth messages may still be queued.
-    if (!trainer_ && msg >= WM_APP && msg <= ble::WM_CONTROLLER_STATE) return 0;
+    if (!trainer_ && msg >= WM_APP && msg <= ble::WM_BLE_LAST) return 0;
     switch (msg) {
     case WM_TIMER:
         OnTick();
@@ -182,20 +231,21 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
         if (wParam & ble::kHasCadence) cadence_ = HIWORD(lParam) / 2.0;
         if (ride_) ride_->OnPower(power_), ride_->OnCadence(cadence_);
         return 0;
-    case ble::WM_TRAINER_STATE:
-        trainerState_ = static_cast<ble::Trainer::State>(wParam);
-        if (trainerState_ == ble::Trainer::State::Connected) {
-            settings_.trainer = trainer_->Address();
-            SaveSettings(settings_);
-        } else {
-            power_ = 0;
-            cadence_ = 0.0;
-            if (ride_) ride_->ClearInputs();
-        }
+    case ble::WM_HEART_RATE:
+        bpm_ = static_cast<int>(wParam);
+        if (ride_ && ride_->heartRate() >= 0) ride_->OnHeartRate(bpm_);
+        return 0;
+    case ble::WM_LINK_STATE:
+        if (wParam < ble::kRoleCount) OnLinkState(static_cast<ble::Role>(wParam), static_cast<ble::Link::State>(lParam));
+        return 0;
+    case ble::WM_RADIO_STATE:
+        radio_ = static_cast<ble::Bluetooth::State>(wParam);
+        // Scanning stops with the radio, so it starts again when the radio comes back.
+        if (radio_ == ble::Bluetooth::State::On && devices_ && !ride_) bluetooth_->Scan(true);
         Redraw();
         return 0;
-    case ble::WM_CONTROLLER_STATE:
-        controllerState_ = static_cast<ble::Controllers::State>(wParam);
+    case ble::WM_NEARBY_CHANGED:
+        UpdateNearby();
         Redraw();
         return 0;
     case ble::WM_RIDE_BUTTONS:
@@ -368,6 +418,7 @@ void App::Start() {
                                    settings_.resistancePct);
     ride_->OnPower(power_);
     ride_->OnCadence(cadence_);
+    ride_->OnHeartRate(Saved(ble::Role::HeartRate).address ? bpm_ : -1);
     for (Hold& h : holds_) h.done = true;  // a button still held from the setup screen doesn't act in the ride
     escAt_ = 0;
     trainer_->SetTarget(ride_->Target());
@@ -396,16 +447,201 @@ void App::EndRide() {
 
 std::wstring App::Status() const {
     if (escAt_ && GetTickCount64() - escAt_ < kConfirmMs) return L"Esc again to end the ride";
-    if (trainerState_ == ble::Trainer::State::NoBluetooth) return L"Bluetooth is off";
-    if (trainerState_ == ble::Trainer::State::Searching) return L"Looking for the trainer";
-    if (controllerState_ == ble::Controllers::State::Locked) return L"Shifters locked, unlock them in Zwift";
+    using S = ble::Link::State;
+    if (radio_ == ble::Bluetooth::State::Off) return L"Bluetooth is off";
+    if (!Saved(ble::Role::Trainer).address) return L"No trainer";
+    if (states_[0] != S::Connected) return L"Looking for the trainer";
+    if (states_[1] == S::Locked) return L"Shifters locked, unlock them in Zwift";
+    if (Saved(ble::Role::HeartRate).address && states_[2] != S::Connected) return L"Looking for the heart rate monitor";
     return {};
+}
+
+void App::ShowDevices() {
+    devices_ = true;
+    focus_ = 0;
+    bluetooth_->Scan(true);
+    Redraw();
+}
+
+void App::ShowCourse() {
+    devices_ = false;
+    autoContinue_ = false;
+    continueAt_ = 0;
+    bluetooth_->Scan(false);
+    Redraw();
+}
+
+ble::Link& App::LinkFor(ble::Role role) {
+    switch (role) {
+    case ble::Role::Trainer: return *trainer_;
+    case ble::Role::Shifters: return *controllers_;
+    case ble::Role::HeartRate: break;
+    }
+    return *monitor_;
+}
+
+// Connects a device for a role, or none with address 0, and remembers it.
+void App::UseDevice(ble::Role role, uint64_t address, std::wstring name) {
+    Saved(role) = {address, name};
+    SaveSettings(settings_);
+    states_[static_cast<size_t>(role)] = ble::Link::State::Idle;  // until the link reports on the new device
+    LinkFor(role).Use(address, std::move(name));
+    autoContinue_ = false;
+    UpdateNearby();
+    Redraw();
+}
+
+void App::OnLinkState(ble::Role role, ble::Link::State state) {
+    states_[static_cast<size_t>(role)] = state;
+    if (state == ble::Link::State::Connected) {
+        // A device remembered without a name gets the one it reports.
+        SavedDevice& saved = Saved(role);
+        if (std::wstring name = LinkFor(role).Name(); saved.address && !name.empty() && name != saved.name) {
+            saved.name = std::move(name);
+            SaveSettings(settings_);
+        }
+    } else if (role == ble::Role::Trainer) {
+        power_ = 0;
+        cadence_ = 0.0;
+        if (ride_) ride_->ClearInputs();
+    } else if (role == ble::Role::Shifters) {
+        OnButtons(0);  // release anything held when they dropped
+    } else {
+        bpm_ = 0;
+        if (ride_ && ride_->heartRate() >= 0) ride_->OnHeartRate(0);
+    }
+    Redraw();
+}
+
+// The nearby devices not already in use, grouped by role.
+void App::UpdateNearby() {
+    nearby_ = bluetooth_->Nearby();
+    std::erase_if(nearby_, [&](const ble::Bluetooth::Device& d) {
+        return std::any_of(std::begin(settings_.devices), std::end(settings_.devices),
+                           [&](const SavedDevice& s) { return s.address == d.address; });
+    });
+    std::stable_sort(nearby_.begin(), nearby_.end(), [](const auto& a, const auto& b) { return a.role < b.role; });
+    focus_ = std::min(focus_, Items() - 1);
+}
+
+// The cards and the nearby devices that fit on screen.
+int App::Items() const { return kCards + static_cast<int>(LayoutDevices(Size(), nearby_.size()).nearbyRows); }
+
+void App::Focus(int dir) {
+    focus_ = std::clamp(focus_ + dir, 0, Items() - 1);
+    Redraw();
+}
+
+// Disconnects the focused card's device, or connects the focused nearby one.
+void App::Act() {
+    if (focus_ < kCards) {
+        const auto role = static_cast<ble::Role>(focus_);
+        if (Saved(role).address) UseDevice(role, 0, {});
+        return;
+    }
+    const size_t i = static_cast<size_t>(focus_ - kCards);
+    if (i >= nearby_.size()) return;
+    const ble::Bluetooth::Device d = nearby_[i];
+    focus_ = static_cast<int>(d.role);  // follow it to its card
+    UseDevice(d.role, d.address, d.name);
+}
+
+// Looks afresh for devices nearby, and retries the remembered ones that aren't connected.
+void App::Refresh() {
+    refreshedAt_ = GetTickCount64();
+    bluetooth_->Scan(true);
+    for (size_t i = 0; i < ble::kRoleCount; ++i) {
+        const auto role = static_cast<ble::Role>(i);
+        if (Saved(role).address && states_[i] != ble::Link::State::Connected)
+            LinkFor(role).Use(Saved(role).address, Saved(role).name);
+    }
+    Redraw();
+}
+
+bool App::AllConnected() const {
+    bool any = false;
+    for (size_t i = 0; i < ble::kRoleCount; ++i) {
+        if (!settings_.devices[i].address) continue;
+        if (states_[i] != ble::Link::State::Connected) return false;
+        any = true;
+    }
+    return any;
+}
+
+DeviceInfo App::Device(ble::Role role) const {
+    using S = ble::Link::State;
+    const size_t i = static_cast<size_t>(role);
+    const SavedDevice& saved = settings_.devices[i];
+    DeviceInfo info{RoleName(role), saved.name, {}, Tone::Waiting};
+    if (saved.address && info.name.empty()) info.name = L"Saved device";
+    switch (states_[i]) {
+    case S::Idle: info.status = saved.address ? L"Connecting" : L"Not set"; break;
+    case S::Connecting: info.status = L"Connecting"; break;
+    case S::NoBluetooth: info.status = L"Bluetooth is off", info.tone = Tone::Problem; break;
+    case S::Missing: info.status = L"Not found, is it awake?", info.tone = Tone::Problem; break;
+    case S::Locked: info.status = L"Locked, unlock it in Zwift", info.tone = Tone::Problem; break;
+    case S::Connected: {
+        info.tone = Tone::Good;
+        wchar_t buf[64] = L"Connected";
+        if (role == ble::Role::Trainer) swprintf_s(buf, L"Connected · %d W · %.0f rpm", power_, cadence_);
+        else if (role == ble::Role::HeartRate && bpm_ > 0) swprintf_s(buf, L"Connected · %d bpm", bpm_);
+        info.status = buf;
+        break;
+    }
+    }
+    return info;
+}
+
+void App::OnDevicesKey(WPARAM key) {
+    switch (key) {
+    case VK_UP:
+    case VK_LEFT: Focus(-1); break;
+    case VK_DOWN:
+    case VK_RIGHT: Focus(+1); break;
+    case VK_RETURN:
+    case VK_SPACE:
+        // With Bluetooth off there is nothing to connect, so Enter turns it on.
+        if (radio_ == ble::Bluetooth::State::Off || radio_ == ble::Bluetooth::State::Missing) bluetooth_->TurnOn();
+        else Act();
+        break;
+    case 'R': Refresh(); break;
+    case VK_ESCAPE:
+    case 'D': ShowCourse(); break;
+    }
+}
+
+void App::OnDevicesClick(D2D1_POINT_2F p) {
+    const DevicesLayout l = LayoutDevices(Size(), nearby_.size());
+    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    if (inside(l.next)) return ShowCourse();
+    if (inside(l.refresh)) return Refresh();
+    if ((radio_ == ble::Bluetooth::State::Off || radio_ == ble::Bluetooth::State::Missing) && inside(l.action))
+        return bluetooth_->TurnOn();
+    // A card takes the focus, and its button disconnects. A nearby row connects anywhere on it.
+    for (int i = 0; i < kCards; ++i) {
+        if (!inside(l.cards[i])) continue;
+        focus_ = i;
+        if (inside(l.disconnect[i])) Act();
+        Redraw();
+        return;
+    }
+    for (size_t i = 0; i < l.nearbyRows; ++i) {
+        if (!inside(l.nearby[i])) continue;
+        focus_ = kCards + static_cast<int>(i);
+        Act();
+        return;
+    }
 }
 
 void App::OnKey(WPARAM key) {
     if (key == VK_F11) return ToggleFullscreen();
+    if (!ride_ && devices_) {
+        autoContinue_ = false;
+        return OnDevicesKey(key);
+    }
     if (!ride_) {
         switch (key) {
+        case 'D': ShowDevices(); break;
         case VK_UP: Select(-1); break;
         case VK_DOWN: Select(+1); break;
         case VK_LEFT:
@@ -456,11 +692,16 @@ void App::OnKey(WPARAM key) {
 
 void App::OnClick(D2D1_POINT_2F p) {
     if (ride_) return;
+    if (devices_) {
+        autoContinue_ = false;
+        return OnDevicesClick(p);
+    }
     const std::vector<Field> fields = Fields();
     const SetupLayout l = LayoutSetup(Size(), fields.size());
     auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
     if (inside(l.start)) return Start();
     if (inside(l.reroll)) return Reroll();
+    if (inside(l.devices)) return ShowDevices();
     for (size_t i = 0; i < fields.size() && i < SetupLayout::kMaxRows; ++i) {
         if (!inside(l.rows[i])) continue;
         selected_ = static_cast<int>(i);
@@ -479,6 +720,7 @@ void App::OnWheel(D2D1_POINT_2F p, int dir) {
         Redraw();
         return;
     }
+    if (devices_) return;
     const std::vector<Field> fields = Fields();
     const SetupLayout l = LayoutSetup(Size(), fields.size());
     for (size_t i = 0; i < fields.size() && i < SetupLayout::kMaxRows; ++i) {
@@ -490,8 +732,10 @@ void App::OnWheel(D2D1_POINT_2F p, int dir) {
     }
 }
 
-// On the setup screen the D-pad moves through the settings and the shifters change them; A starts. In a ride,
-// right shifters go harder and left ones easier, like Zwift, and the D-pad moves in big steps.
+// On the devices screen the D-pad and shifters move, A connects or disconnects, Y refreshes and B moves on. On
+// the setup screen the D-pad moves through the settings and the shifters change them; A starts and B goes back
+// to the devices. In a ride, right shifters go harder and left ones easier, like Zwift, and the D-pad moves in
+// big steps.
 void App::OnButtons(uint32_t pressed) {
     namespace b = ble::button;
     const uint32_t down = pressed & ~buttons_;
@@ -500,6 +744,16 @@ void App::OnButtons(uint32_t pressed) {
     for (Hold& h : holds_)
         if (down & h.button) h.since = now, h.done = false;
 
+    if (!ride_ && devices_) {
+        if (!down) return;
+        autoContinue_ = false;
+        if (down & (b::kUp | b::kLeft | b::kShiftUpLeft | b::kShiftDownLeft)) Focus(-1);
+        if (down & (b::kDown | b::kRight | b::kShiftUpRight | b::kShiftDownRight)) Focus(+1);
+        if (down & b::kA) Act();
+        if (down & b::kY) Refresh();
+        if (down & b::kB) ShowCourse();
+        return;
+    }
     if (!ride_) {
         if (down & b::kUp) Select(-1);
         if (down & b::kDown) Select(+1);
@@ -507,6 +761,7 @@ void App::OnButtons(uint32_t pressed) {
         if (down & (b::kLeft | b::kShiftUpLeft | b::kShiftDownLeft)) Change(Fields()[selected_], -1);
         if (down & b::kY) Reroll();
         if (down & b::kA) Start();
+        if (down & b::kB) ShowDevices();
         return;
     }
     if (ride_->finished()) {
@@ -549,6 +804,12 @@ void App::OnTick() {
         }
         if (ride_->finished()) CloseLog();
     }
+    // Once the remembered devices have all connected, the screen says so for a moment and moves on.
+    if (!ride_ && devices_ && autoContinue_) {
+        if (!AllConnected()) continueAt_ = 0;
+        else if (!continueAt_) continueAt_ = now + kContinueMs;
+        else if (now >= continueAt_) ShowCourse();
+    }
     if (!IsIconic(hwnd_)) Redraw();
 }
 
@@ -566,32 +827,55 @@ void App::Paint() {
                 props, D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right, rc.bottom)), target_.put()));
         }
         target_->BeginDraw();
+        DeviceInfo devices[ble::kRoleCount];
+        for (size_t i = 0; i < ble::kRoleCount; ++i) devices[i] = Device(static_cast<ble::Role>(i));
         if (ride_) {
             renderer_->Draw(target_.get(), *ride_, Status());
+        } else if (devices_) {
+            std::vector<NearbyRow> nearby;
+            for (const auto& d : nearby_)
+                nearby.push_back({RoleName(d.role), d.name.empty() ? std::wstring_view(L"Unnamed") : d.name});
+            DevicesView view;
+            view.cards = devices;
+            view.nearby = nearby;
+            view.focus = focus_;
+            switch (radio_) {
+            case ble::Bluetooth::State::Unknown: view.bluetooth = L"Checking Bluetooth"; break;
+            case ble::Bluetooth::State::Missing:
+                view.bluetooth = L"No Bluetooth adapter found";
+                view.action = L"Open settings";
+                break;
+            case ble::Bluetooth::State::Off:
+                view.bluetooth = L"Bluetooth is off";
+                view.action = L"Turn on";
+                break;
+            case ble::Bluetooth::State::On: view.bluetooth = L"Bluetooth is on and looking for devices"; break;
+            }
+            wchar_t footer[96] = L"Your devices are remembered and connect by themselves next time.";
+            if (autoContinue_ && continueAt_) {
+                const ULONGLONG left = continueAt_ - std::min(continueAt_, GetTickCount64());
+                swprintf_s(footer, L"All connected. Continuing in %llu s", (left + 999) / 1000);
+            } else if (autoContinue_) {
+                wcscpy_s(footer, L"Connecting to your devices");
+            }
+            view.footer = footer;
+            // For a few seconds after Refresh the button counts dots, so the press visibly did something.
+            const ULONGLONG sinceRefresh = GetTickCount64() - refreshedAt_;
+            static constexpr std::wstring_view kSearching[] = {L"Searching.", L"Searching..", L"Searching..."};
+            if (refreshedAt_ && sinceRefresh < kSearchMs) {
+                view.searching = true;
+                view.refresh = kSearching[sinceRefresh / 400 % 3];
+            }
+            renderer_->DrawDevices(target_.get(), view);
         } else {
             std::vector<SetupRow> rows;
             for (Field f : Fields()) rows.push_back({Label(f), Value(f)});
-            wchar_t trainer[96];
-            switch (trainerState_) {
-            case ble::Trainer::State::NoBluetooth: wcscpy_s(trainer, L"Trainer · Bluetooth is off"); break;
-            case ble::Trainer::State::Searching: wcscpy_s(trainer, L"Trainer · looking for it"); break;
-            case ble::Trainer::State::Connected:
-                swprintf_s(trainer, L"Trainer · connected · %d W · %.0f rpm", power_, cadence_);
-                break;
-            }
-            const wchar_t* shifters = controllerState_ == ble::Controllers::State::Connected ? L"Shifters · connected"
-                                      : controllerState_ == ble::Controllers::State::Locked
-                                          ? L"Shifters · locked, unlock them in Zwift"
-                                          : L"Shifters · looking for them, the keyboard works too";
             SetupView view;
             view.rows = rows;
             view.selected = selected_;
             view.course = &course_;
             view.summary = summary_;
-            view.trainer = trainer;
-            view.shifters = shifters;
-            view.trainerReady = trainerState_ == ble::Trainer::State::Connected;
-            view.shiftersReady = controllerState_ == ble::Controllers::State::Connected;
+            view.devices = devices;
             renderer_->DrawSetup(target_.get(), view);
         }
         if (target_->EndDraw() == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) target_ = nullptr;
@@ -648,13 +932,14 @@ void App::WriteLog() {
         const CourseParams& c = ride_->course().params;
         std::fprintf(log_, "# km=%.1f gain=%.0f max_grade=%.0f loop=%d seed=%u\n", c.km, ride_->course().targetGain,
                      c.maxGradePct, c.loop ? 1 : 0, c.seed);
-        std::fprintf(log_, "time_s,distance_m,elevation_m,grade_pct,power_w,cadence_rpm,speed_kmh,mode,gear,target\n");
+        std::fprintf(log_, "time_s,distance_m,elevation_m,grade_pct,power_w,cadence_rpm,speed_kmh,mode,gear,target,"
+                           "heart_rate_bpm\n");
     }
     static const char* const kModes[] = {"sim", "erg", "resistance"};
     const Ride& r = *ride_;
-    std::fprintf(log_, "%.0f,%.1f,%.1f,%.1f,%d,%.0f,%.1f,%s,%d,%d\n", r.elapsed(), r.distance(), r.elevation(),
+    std::fprintf(log_, "%.0f,%.1f,%.1f,%.1f,%d,%.0f,%.1f,%s,%d,%d,%d\n", r.elapsed(), r.distance(), r.elevation(),
                  r.grade() * 100, r.power(), r.cadence(), r.speed() * 3.6, kModes[static_cast<int>(r.mode())], r.gear(),
-                 r.Target().value);
+                 r.Target().value, std::max(r.heartRate(), 0));
     std::fflush(log_);
 }
 
@@ -671,6 +956,8 @@ void App::Shutdown() {
     // Release the trainer before the window goes, so it isn't left holding a power target.
     trainer_.reset();
     controllers_.reset();
+    monitor_.reset();
+    bluetooth_.reset();
     if (ride_) KeepRideSettings();
     SaveSettings(settings_);
 }

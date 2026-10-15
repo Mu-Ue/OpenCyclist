@@ -41,6 +41,7 @@ bool Snapshot(const Settings& settings) {
               settings.resistancePct);
     ride.OnPower(230);
     ride.OnCadence(88);
+    ride.OnHeartRate(142);
     while (ride.distance() < ride.course().Length() * 0.4 && !ride.finished()) ride.Tick(kTickMs / 1000.0);
     return SaveSnapshot(ride, L"", settings.snapshot);
 }

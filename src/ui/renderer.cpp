@@ -9,9 +9,9 @@
 
 namespace {
 
-// Dark and flat. The accent matches the icon.
-constexpr UINT32 kBackground = 0x111418, kText = 0xE6E8EB, kMuted = 0x8A9099, kAccent = 0xF97316,
-                 kTrack = 0x262C34, kRidden = 0x7C3A12;
+// Dark and flat. The accent matches the icon. Green marks a connected device.
+constexpr UINT32 kBackground = 0x111418, kPanel = 0x1A1F26, kText = 0xE6E8EB, kMuted = 0x8A9099, kAccent = 0xF97316,
+                 kGood = 0x22C55E, kTrack = 0x262C34, kRidden = 0x7C3A12;
 
 // Layout sizes are in DIPs for a 1280 x 720 window and scale with it.
 float Scale(D2D1_SIZE_F size) { return std::max(0.1f, std::min(size.width / 1280.0f, size.height / 720.0f)); }
@@ -22,6 +22,11 @@ winrt::com_ptr<IDWriteTextFormat> MakeFormat(IDWriteFactory* dwrite, DWRITE_FONT
     winrt::check_hresult(dwrite->CreateTextFormat(L"Segoe UI", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
                                                   DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", format.put()));
     format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    // Text too long for its box, such as a long device name, ends in an ellipsis.
+    const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+    winrt::com_ptr<IDWriteInlineObject> ellipsis;
+    if (SUCCEEDED(dwrite->CreateEllipsisTrimmingSign(format.get(), ellipsis.put())))
+        format->SetTrimming(&trimming, ellipsis.get());
     if (centered) format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     return format;
 }
@@ -37,7 +42,32 @@ SetupLayout LayoutSetup(D2D1_SIZE_F size, size_t rows) {
         l.rows[i] = {pad, top + rowHeight * i, pad + left, top + rowHeight * (i + 1) - 6.0f * s};
     l.start = {size.width - pad - 180.0f * s, bottom - 52.0f * s, size.width - pad, bottom};
     l.reroll = {l.start.left - 196.0f * s, l.start.top, l.start.left - 16.0f * s, bottom};
+    l.devices = {l.reroll.left - 196.0f * s, l.start.top, l.reroll.left - 16.0f * s, bottom};
     l.preview = {pad + left + 56.0f * s, top + 28.0f * s, size.width - pad, l.start.top - 96.0f * s};
+    return l;
+}
+
+DevicesLayout LayoutDevices(D2D1_SIZE_F size, size_t nearby) {
+    const float s = Scale(size), pad = 32.0f * s, right = size.width - pad, bottom = size.height - pad;
+    DevicesLayout l;
+    l.next = {right - 180.0f * s, bottom - 52.0f * s, right, bottom};
+    l.refresh = {l.next.left - 196.0f * s, l.next.top, l.next.left - 16.0f * s, bottom};
+    l.banner = {pad, pad + 64.0f * s, right, pad + 112.0f * s};
+    l.action = {right - 166.0f * s, l.banner.top + 6.0f * s, right - 6.0f * s, l.banner.bottom - 6.0f * s};
+    const float gap = 16.0f * s, cardWidth = (right - pad - 2 * gap) / DevicesLayout::kCards;
+    const float cardTop = l.banner.bottom + gap, cardBottom = cardTop + 136.0f * s;
+    for (size_t i = 0; i < DevicesLayout::kCards; ++i) {
+        const float left = pad + (cardWidth + gap) * i;
+        l.cards[i] = {left, cardTop, left + cardWidth, cardBottom};
+        l.disconnect[i] = {left + cardWidth - 134.0f * s, cardBottom - 54.0f * s, left + cardWidth - 14.0f * s,
+                           cardBottom - 14.0f * s};
+    }
+    l.nearbyTop = cardBottom + 52.0f * s;
+    const float rowHeight = 46.0f * s;
+    const auto fit = static_cast<size_t>(std::max(0.0f, (l.next.top - gap - l.nearbyTop) / rowHeight));
+    l.nearbyRows = std::min({nearby, fit, DevicesLayout::kMaxNearby});
+    for (size_t i = 0; i < l.nearbyRows; ++i)
+        l.nearby[i] = {pad, l.nearbyTop + rowHeight * i, right, l.nearbyTop + rowHeight * (i + 1) - 6.0f * s};
     return l;
 }
 
@@ -54,9 +84,11 @@ float Renderer::Prepare(ID2D1RenderTarget* target) {
             winrt::check_hresult(target->CreateSolidColorBrush(D2D1::ColorF(rgb), brush.put()));
         };
         make(kBackground, background_);
+        make(kPanel, panel_);
         make(kText, text_);
         make(kMuted, muted_);
         make(kAccent, accent_);
+        make(kGood, good_);
         make(kTrack, track_);
         make(kRidden, ridden_);
         brushTarget_.copy_from(target);
@@ -64,6 +96,7 @@ float Renderer::Prepare(ID2D1RenderTarget* target) {
     const float s = Scale(target->GetSize());
     if (s != scale_) {
         label_ = MakeFormat(dwrite_.get(), DWRITE_FONT_WEIGHT_NORMAL, 15.0f * s);
+        small_ = MakeFormat(dwrite_.get(), DWRITE_FONT_WEIGHT_NORMAL, 15.0f * s, true);
         row_ = MakeFormat(dwrite_.get(), DWRITE_FONT_WEIGHT_NORMAL, 19.0f * s, true);
         title_ = MakeFormat(dwrite_.get(), DWRITE_FONT_WEIGHT_SEMI_BOLD, 30.0f * s, true);
         scale_ = s;
@@ -77,9 +110,11 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     const float s = Prepare(target), pad = 32.0f * s;
     const D2D1_SIZE_F size = target->GetSize();
 
-    // Live numbers in five columns. The last one depends on the mode.
-    wchar_t power[16], cadence[16], speed[16], grade[16], last[16];
+    // Live numbers in columns, with heart rate when there is a monitor. The last one depends on the mode.
+    wchar_t power[16], heart[16], cadence[16], speed[16], grade[16], last[16];
     swprintf_s(power, L"%d", ride.power());
+    if (ride.heartRate() > 0) swprintf_s(heart, L"%d", ride.heartRate());
+    else wcscpy_s(heart, L"–");
     swprintf_s(cadence, L"%.0f", ride.cadence());
     swprintf_s(speed, L"%.1f", ride.speed() * 3.6);
     swprintf_s(grade, L"%.1f", ride.grade() * 100);
@@ -90,14 +125,22 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     case Mode::Erg: swprintf_s(last, L"%d", ride.ergW()), lastLabel = L"Target", lastUnit = L"W"; break;
     case Mode::Resistance: swprintf_s(last, L"%d", ride.resistancePct()), lastLabel = L"Resistance", lastUnit = L"%"; break;
     }
-    const float colWidth = (size.width - 2 * pad) / 5;
+    struct Metric {
+        std::wstring_view label, value, unit;
+    };
+    Metric metrics[6];
+    int count = 0;
+    metrics[count++] = {L"Power", power, L"W"};
+    if (ride.heartRate() >= 0) metrics[count++] = {L"Heart rate", heart, L"bpm"};
+    metrics[count++] = {L"Cadence", cadence, L"rpm"};
+    metrics[count++] = {L"Speed", speed, L"km/h"};
+    metrics[count++] = {L"Grade", grade, L"%"};
+    metrics[count++] = {lastLabel, last, lastUnit};
+    const float colWidth = (size.width - 2 * pad) / count;
     const float top = pad, metricsBottom = top + 100.0f * s;
-    const std::wstring_view labels[] = {L"Power", L"Cadence", L"Speed", L"Grade", lastLabel};
-    const std::wstring_view values[] = {power, cadence, speed, grade, last};
-    const std::wstring_view units[] = {L"W", L"rpm", L"km/h", L"%", lastUnit};
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < count; ++i) {
         const float x = pad + colWidth * i;
-        DrawMetric(target, {x, top, x + colWidth, metricsBottom}, labels[i], values[i], units[i], s);
+        DrawMetric(target, {x, top, x + colWidth, metricsBottom}, metrics[i].label, metrics[i].value, metrics[i].unit, s);
     }
 
     // The next 2 km in detail, starting a little behind the rider.
@@ -142,7 +185,7 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
     const SetupLayout l = LayoutSetup(size, view.rows.size());
 
     DrawLabel(target, kAppName, title_.get(), {pad, pad, size.width - pad, pad + 44.0f * s}, text_.get());
-    DrawLabel(target, L"↑↓ choose · ←→ change · R new course · Enter start · F11 full screen", label_.get(),
+    DrawLabel(target, L"↑↓ choose · ←→ change · R new course · D devices · Enter start · F11 full screen", label_.get(),
               {pad, pad + 12.0f * s, size.width - pad, pad + 44.0f * s}, muted_.get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
 
     // Settings on the left. The selected one is highlighted, with arrows to change it.
@@ -172,16 +215,99 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
                   text_.get());
     }
 
-    // Connections at the bottom left, buttons at the bottom right.
-    const float lineHeight = 24.0f * s;
-    DrawLabel(target, view.trainer, label_.get(), {pad, l.start.top, l.reroll.left, l.start.top + lineHeight},
-              view.trainerReady ? text_.get() : accent_.get());
-    DrawLabel(target, view.shifters, label_.get(), {pad, l.start.top + lineHeight, l.reroll.left, l.start.bottom},
-              view.shiftersReady ? text_.get() : muted_.get());
-    target->FillRoundedRectangle(D2D1::RoundedRect(l.reroll, 6.0f * s, 6.0f * s), track_.get());
-    DrawLabel(target, L"New course", row_.get(), l.reroll, text_.get(), DWRITE_TEXT_ALIGNMENT_CENTER);
-    target->FillRoundedRectangle(D2D1::RoundedRect(l.start, 6.0f * s, 6.0f * s), accent_.get());
-    DrawLabel(target, L"Start ride", row_.get(), l.start, background_.get(), DWRITE_TEXT_ALIGNMENT_CENTER);
+    // Devices at the bottom left, one line each, buttons at the bottom right.
+    const float lineHeight = 22.0f * s;
+    const size_t lines = view.devices.size();
+    for (size_t i = 0; i < lines; ++i) {
+        const DeviceInfo& d = view.devices[i];
+        const float top = l.start.bottom - lineHeight * (lines - i);
+        DrawDot(target, {pad + 4.0f * s, top + lineHeight / 2}, d.tone);
+        std::wstring text(d.role);
+        if (!d.name.empty()) text.append(L" · ").append(d.name);
+        text.append(L" · ").append(d.status);
+        DrawLabel(target, text, small_.get(), {pad + 16.0f * s, top, l.devices.left - 16.0f * s, top + lineHeight},
+                  TextBrush(d.tone));
+    }
+    DrawButton(target, l.devices, L"Devices", false, row_.get());
+    DrawButton(target, l.reroll, L"New course", false, row_.get());
+    DrawButton(target, l.start, L"Start ride", true, row_.get());
+}
+
+void Renderer::DrawDevices(ID2D1RenderTarget* target, const DevicesView& view) {
+    const float s = Prepare(target), pad = 32.0f * s, inset = 16.0f * s, radius = 6.0f * s;
+    const D2D1_SIZE_F size = target->GetSize();
+    const DevicesLayout l = LayoutDevices(size, view.nearby.size());
+    auto rounded = [&](const D2D1_RECT_F& r) { return D2D1::RoundedRect(r, radius, radius); };
+
+    DrawLabel(target, L"Devices", title_.get(), {pad, pad, size.width - pad, pad + 44.0f * s}, text_.get());
+    DrawLabel(target, L"↑↓ choose · Enter connect or disconnect · R refresh · Esc continue · F11 full screen",
+              label_.get(), {pad, pad + 12.0f * s, size.width - pad, pad + 44.0f * s}, muted_.get(),
+              DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+    // Bluetooth itself, with a button to fix it when it's off.
+    const bool off = !view.action.empty();
+    target->FillRoundedRectangle(rounded(l.banner), panel_.get());
+    DrawLabel(target, view.bluetooth, row_.get(),
+              {l.banner.left + inset, l.banner.top, (off ? l.action.left : l.banner.right) - inset, l.banner.bottom},
+              off ? accent_.get() : muted_.get());
+    if (off) DrawButton(target, l.action, view.action, true, row_.get());
+
+    // A card for each role: what it is, which device, and how it's doing.
+    for (size_t i = 0; i < std::min(view.cards.size(), DevicesLayout::kCards); ++i) {
+        const DeviceInfo& d = view.cards[i];
+        const D2D1_RECT_F c = l.cards[i], b = l.disconnect[i];
+        target->FillRoundedRectangle(rounded(c), panel_.get());
+        if (view.focus == static_cast<int>(i)) target->DrawRoundedRectangle(rounded(c), accent_.get(), 2.0f * s);
+        DrawLabel(target, d.role, label_.get(), {c.left + inset, c.top + 14.0f * s, c.right - inset, c.top + 36.0f * s},
+                  muted_.get());
+        DrawLabel(target, d.name.empty() ? L"None" : std::wstring_view(d.name), row_.get(),
+                  {c.left + inset, c.top + 40.0f * s, c.right - inset, c.top + 72.0f * s},
+                  d.name.empty() ? muted_.get() : text_.get());
+        DrawDot(target, {c.left + inset + 4.0f * s, (b.top + b.bottom) / 2}, d.tone);
+        DrawLabel(target, d.status, small_.get(),
+                  {c.left + inset + 16.0f * s, b.top, (d.name.empty() ? c.right - inset : b.left - 8.0f * s), b.bottom},
+                  TextBrush(d.tone));
+        if (!d.name.empty()) DrawButton(target, b, L"Disconnect", false, small_.get());
+    }
+
+    // Devices nearby, each a click away.
+    DrawLabel(target, L"Nearby", label_.get(), {pad, l.nearbyTop - 30.0f * s, size.width - pad, l.nearbyTop - 8.0f * s},
+              muted_.get());
+    if (view.nearby.empty())
+        DrawLabel(target,
+                  view.searching ? L"Searching for trainers, Zwift Ride shifters and heart rate straps"
+                                 : L"Nothing new yet. Wake your trainer, Zwift Ride or heart rate strap and it shows up here.",
+                  row_.get(), {pad, l.nearbyTop, size.width - pad, l.nearbyTop + 40.0f * s}, muted_.get());
+    for (size_t i = 0; i < l.nearbyRows; ++i) {
+        const D2D1_RECT_F r = l.nearby[i];
+        const bool focused = view.focus == static_cast<int>(DevicesLayout::kCards + i);
+        target->FillRoundedRectangle(rounded(r), focused ? track_.get() : panel_.get());
+        const float roleRight = r.left + inset + 140.0f * s;
+        const D2D1_RECT_F button{r.right - 126.0f * s, r.top + 5.0f * s, r.right - 6.0f * s, r.bottom - 5.0f * s};
+        DrawLabel(target, view.nearby[i].role, row_.get(), {r.left + inset, r.top, roleRight, r.bottom}, muted_.get());
+        DrawLabel(target, view.nearby[i].name, row_.get(), {roleRight, r.top, button.left - inset, r.bottom}, text_.get());
+        DrawButton(target, button, L"Connect", focused, small_.get());
+    }
+
+    DrawLabel(target, view.footer, small_.get(), {pad, l.next.top, l.refresh.left - inset, l.next.bottom}, muted_.get());
+    DrawButton(target, l.refresh, view.refresh, false, row_.get());
+    DrawButton(target, l.next, L"Continue", true, row_.get());
+}
+
+void Renderer::DrawButton(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view text, bool primary,
+                          IDWriteTextFormat* format) {
+    const float radius = 6.0f * scale_;
+    target->FillRoundedRectangle(D2D1::RoundedRect(box, radius, radius), primary ? accent_.get() : track_.get());
+    DrawLabel(target, text, format, box, primary ? background_.get() : text_.get(), DWRITE_TEXT_ALIGNMENT_CENTER);
+}
+
+void Renderer::DrawDot(ID2D1RenderTarget* target, D2D1_POINT_2F center, Tone tone) {
+    const float r = 4.0f * scale_;
+    target->FillEllipse(D2D1::Ellipse(center, r, r), tone == Tone::Good ? good_.get() : TextBrush(tone));
+}
+
+ID2D1Brush* Renderer::TextBrush(Tone tone) const {
+    return tone == Tone::Good ? text_.get() : tone == Tone::Problem ? accent_.get() : muted_.get();
 }
 
 void Renderer::DrawMetric(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view label, std::wstring_view value,

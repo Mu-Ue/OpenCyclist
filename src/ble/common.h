@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
@@ -24,13 +26,23 @@ using winrt::Windows::Foundation::IAsyncAction;
 using winrt::Windows::Foundation::IAsyncOperation;
 
 // Messages the BLE threads post to the app window.
-constexpr UINT WM_TRAINER_DATA = WM_APP + 1;      // wParam: kHasPower | kHasCadence, lParam: power, cadence x2
-constexpr UINT WM_TRAINER_STATE = WM_APP + 2;     // wParam: Trainer::State
-constexpr UINT WM_RIDE_BUTTONS = WM_APP + 3;      // lParam: pressed button bits
-constexpr UINT WM_CONTROLLER_STATE = WM_APP + 4;  // wParam: Controllers::State
+constexpr UINT WM_TRAINER_DATA = WM_APP + 1;    // wParam: kHasPower | kHasCadence, lParam: power, cadence x2
+constexpr UINT WM_LINK_STATE = WM_APP + 2;      // wParam: Role, lParam: Link::State
+constexpr UINT WM_RIDE_BUTTONS = WM_APP + 3;    // lParam: pressed button bits
+constexpr UINT WM_HEART_RATE = WM_APP + 4;      // wParam: beats per minute, 0 when the strap has nothing
+constexpr UINT WM_RADIO_STATE = WM_APP + 5;     // wParam: Bluetooth::State
+constexpr UINT WM_NEARBY_CHANGED = WM_APP + 6;  // the list of devices nearby changed
+constexpr UINT WM_BLE_LAST = WM_NEARBY_CHANGED;
+
+// What a device is for. Also the order of the devices on screen and in the settings.
+enum class Role { Trainer, Shifters, HeartRate };
+constexpr size_t kRoleCount = 3;
 
 // A 16-bit UUID from the Bluetooth base UUID.
 winrt::guid ShortUuid(uint16_t id);
+
+// A device name from the air without control characters and cut to a sane length, safe to show and save.
+std::wstring CleanName(std::wstring_view name);
 
 // Whether a Bluetooth LE radio is present and on.
 IAsyncOperation<bool> RadioOn();

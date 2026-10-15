@@ -16,6 +16,8 @@ const winrt::guid kSyncRx{0x00000003, 0x19CA, 0x4651, {0x86, 0xE5, 0xFA, 0x29, 0
 const winrt::guid kSyncTx{0x00000004, 0x19CA, 0x4651, {0x86, 0xE5, 0xFA, 0x29, 0xDC, 0xDD, 0x09, 0xD1}};
 constexpr uint8_t kButtonMessage = 0x23;
 
+}  // namespace
+
 bool IsRideLeft(const adv::BluetoothLEAdvertisement& ad) {
     for (const auto& data : ad.ManufacturerData()) {
         if (data.CompanyId() != kZwiftCompanyId) continue;
@@ -25,65 +27,36 @@ bool IsRideLeft(const adv::BluetoothLEAdvertisement& ad) {
     return false;
 }
 
-}  // namespace
-
-Controllers::Controllers(HWND window) : window_(window) { Run(); }
-
-Controllers::~Controllers() {
-    stop_ = true;
-    SetEvent(wake_.get());
-    WaitForSingleObject(done_.get(), 5000);
+Controllers::Controllers(HWND window, uint64_t address, std::wstring name)
+    : Link(window, Role::Shifters, IsRideLeft, address, std::move(name)) {
+    Start();
 }
 
-winrt::fire_and_forget Controllers::Run() {
-    co_await winrt::resume_background();
-    while (!stop_) {
-        try {
-            co_await Session();
-        } catch (...) {
-        }
-        if (stop_) break;
-        Post(WM_RIDE_BUTTONS, 0, 0);  // release anything held when it dropped
-        co_await winrt::resume_on_signal(wake_.get(), 2s);
-    }
-    SetEvent(done_.get());
-}
+Controllers::~Controllers() { Stop(); }
 
-IAsyncAction Controllers::Session() {
-    if (!co_await RadioOn()) {
-        co_await winrt::resume_on_signal(wake_.get(), 3s);
-        co_return;
-    }
-    const uint64_t address = co_await Scan(IsRideLeft, 10s, wake_.get());
-    if (address == 0) {
-        Post(WM_CONTROLLER_STATE, static_cast<WPARAM>(State::Searching));
-        co_return;
-    }
-
-    Connection link;
-    link.device = co_await BluetoothLEDevice::FromBluetoothAddressAsync(address);
-    if (!link.device) co_return;
+IAsyncOperation<bool> Controllers::Session(Connection& link) {
     link.service = co_await FindService(link.device, kRideService);
     if (!link.service) link.service = co_await FindService(link.device, kLegacyService);
     if (!link.service) {
-        Post(WM_CONTROLLER_STATE, static_cast<WPARAM>(State::Locked));
-        co_await winrt::resume_on_signal(wake_.get(), 30s);
-        co_return;
+        SetState(State::Locked);
+        co_await winrt::resume_on_signal(Wake(), 30s);
+        co_return true;
     }
 
     const auto async = co_await FindCharacteristic(link.service, kAsync);
     const auto syncRx = co_await FindCharacteristic(link.service, kSyncRx);
     const auto syncTx = co_await FindCharacteristic(link.service, kSyncTx);
-    if (!async || !syncRx || !syncTx) co_return;
+    if (!async || !syncRx || !syncTx) co_return true;
 
     auto handler = [this](const auto&, const gatt::GattValueChangedEventArgs& args) { OnMessage(args.CharacteristicValue()); };
     const auto asyncRevoker = async.ValueChanged(winrt::auto_revoke, handler);
     const auto syncRevoker = syncTx.ValueChanged(winrt::auto_revoke, handler);
-    if (!co_await Subscribe(async, Cccd::Notify) || !co_await Subscribe(syncTx, Cccd::Indicate)) co_return;
-    if (!co_await Write(syncRx, {'R', 'i', 'd', 'e', 'O', 'n'}, false)) co_return;
+    if (!co_await Subscribe(async, Cccd::Notify) || !co_await Subscribe(syncTx, Cccd::Indicate)) co_return true;
+    if (!co_await Write(syncRx, {'R', 'i', 'd', 'e', 'O', 'n'}, false)) co_return true;
 
-    Post(WM_CONTROLLER_STATE, static_cast<WPARAM>(State::Connected));
-    while (!stop_ && Connected(link.device)) co_await winrt::resume_on_signal(wake_.get(), 1s);
+    SetState(State::Connected);
+    while (!Changed() && Connected(link.device)) co_await winrt::resume_on_signal(Wake(), 1s);
+    co_return true;
 }
 
 // A button message is the type byte, then a protobuf whose field 1 is the button bits, each clear while pressed.

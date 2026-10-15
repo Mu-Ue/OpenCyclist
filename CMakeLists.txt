@@ -19,8 +19,11 @@ target_compile_options(sim PUBLIC /W4 /permissive- /utf-8 /sdl /guard:cf /guard:
 add_executable(OpenCyclist WIN32
     src/main.cpp
     src/app.cpp
+    src/ble/bluetooth.cpp
     src/ble/common.cpp
     src/ble/ftms.cpp
+    src/ble/heart_rate.cpp
+    src/ble/link.cpp
     src/ble/zwift_ride.cpp
     src/platform/settings.cpp
     src/ui/renderer.cpp
