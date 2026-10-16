@@ -13,6 +13,9 @@ namespace {
 // headroom so the climbs aren't one long wall at the max grade.
 constexpr double kHeadroom = 0.6;
 
+// Climbing per stretch of an endless course, from flat to mountains.
+constexpr double kTerrainGain[kTerrainCount] = {0.0, 150.0, 350.0, 600.0};
+
 size_t Steps(const CourseParams& params) {
     return std::max<size_t>(1, static_cast<size_t>(std::lround(params.km * 1000.0 / kCourseStep)));
 }
@@ -121,9 +124,42 @@ double Course::Gain() const {
     return gain;
 }
 
+// Each stretch has its own seed. Grades ease from the old road into the new one as fast as real roads change.
+void Course::Extend() {
+    CourseParams next = params;
+    next.seed += static_cast<uint32_t>(std::lround(Length() / (kEndlessStretchKm * 1000.0)));
+    const std::vector<float> stretch = GenerateCourse(next).elevation;
+    const size_t n = elevation.size();
+    double grade = n < 2 ? 0.0 : (elevation[n - 1] - elevation[n - 2]) / kCourseStep;
+    double e = n ? elevation.back() : 0.0, lowest = 0.0;
+    if (!n) elevation.push_back(0.0f);
+    elevation.reserve(elevation.size() + stretch.size() - 1);
+    for (size_t i = 1; i < stretch.size(); ++i) {
+        grade = std::clamp((stretch[i] - stretch[i - 1]) / kCourseStep, grade - kMaxGradeChange, grade + kMaxGradeChange);
+        e += grade * kCourseStep;
+        lowest = std::min(lowest, e);
+        elevation.push_back(static_cast<float>(e));
+    }
+    // Heights stay above 0 m, like any course.
+    if (lowest < 0.0)
+        for (float& x : elevation) x -= static_cast<float>(lowest);
+}
+
 uint32_t RandomSeed() { return std::random_device{}() | 1u; }
 
 Course GenerateCourse(const CourseParams& params) {
+    // An endless course starts with one stretch. It closes like a loop, so the road doesn't drift up or down.
+    if (params.endless) {
+        CourseParams stretch = params;
+        stretch.km = kEndlessStretchKm;
+        stretch.loop = true;
+        stretch.endless = false;
+        stretch.gainM = std::min(kTerrainGain[std::clamp(params.terrain, 0, kTerrainCount - 1)], MaxGain(stretch));
+        Course course = GenerateCourse(stretch);
+        course.params = params;
+        return course;
+    }
+
     Course course;
     course.params = params;
     const size_t n = Steps(params);

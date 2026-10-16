@@ -44,8 +44,11 @@ std::wstring_view RoleName(ble::Role role) {
     return {};
 }
 
-// The settings on the setup screen, top to bottom. Target shows only in ERG mode.
-enum class Field { Km, Gain, MaxGrade, Route, Mode, Target, Rider };
+// The settings on the setup screen, top to bottom. The route picks the course settings, and Target shows only in
+// ERG mode. The course settings come before Mode.
+enum class Field { Route, Km, Terrain, Gain, MaxGrade, Mode, Target, Rider };
+
+constexpr const wchar_t* kTerrainNames[kTerrainCount] = {L"Flat", L"Rolling", L"Hilly", L"Mountains"};
 
 // The next value up or down from v on a grid of `step`, so odd values from the ini snap onto it.
 double StepValue(double v, int dir, double step, double lo, double hi) {
@@ -359,7 +362,12 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 std::vector<Field> App::Fields() const {
-    std::vector<Field> fields{Field::Km, Field::Gain, Field::MaxGrade, Field::Route, Field::Mode};
+    const CourseParams& c = settings_.course;
+    std::vector<Field> fields{Field::Route};
+    if (!c.endless) fields.insert(fields.end(), {Field::Km, Field::Gain, Field::MaxGrade});
+    else if (c.terrain > 0) fields.insert(fields.end(), {Field::Terrain, Field::MaxGrade});
+    else fields.push_back(Field::Terrain);
+    fields.push_back(Field::Mode);
     if (settings_.mode == Mode::Erg) fields.push_back(Field::Target);
     fields.push_back(Field::Rider);
     return fields;
@@ -368,6 +376,7 @@ std::vector<Field> App::Fields() const {
 std::wstring_view App::Label(Field field) const {
     switch (field) {
     case Field::Km: return L"Distance";
+    case Field::Terrain: return L"Terrain";
     case Field::Gain: return L"Elevation gain";
     case Field::MaxGrade: return L"Max grade";
     case Field::Route: return L"Route";
@@ -385,7 +394,8 @@ std::wstring App::Value(Field field) const {
     case Field::Km: swprintf_s(buf, L"%g km", c.km); break;
     case Field::Gain: swprintf_s(buf, L"%g m", c.gainM); break;
     case Field::MaxGrade: swprintf_s(buf, L"%g %%", c.maxGradePct); break;
-    case Field::Route: return c.loop ? L"Loop" : L"Point to point";
+    case Field::Terrain: return kTerrainNames[std::clamp(c.terrain, 0, kTerrainCount - 1)];
+    case Field::Route: return c.endless ? L"Endless" : c.loop ? L"Loop" : L"Point to point";
     case Field::Mode: return settings_.mode == Mode::Erg ? L"ERG" : L"Sim";
     case Field::Target: swprintf_s(buf, L"%d W", settings_.ergW); break;
     case Field::Rider: swprintf_s(buf, L"%g kg", settings_.riderKg); break;
@@ -397,17 +407,24 @@ std::wstring App::Value(Field field) const {
 void App::Change(Field field, int dir) {
     CourseParams& c = settings_.course;
     switch (field) {
+    case Field::Terrain: c.terrain = std::clamp(c.terrain + dir, 0, kTerrainCount - 1); break;
     case Field::Km: c.km = StepValue(c.km, dir, (dir > 0 ? c.km >= 10 : c.km > 10) ? 5 : 1, 1, 500); break;
     case Field::Gain:
         c.gainM = StepValue(c.gainM, dir, (dir > 0 ? c.gainM >= 1000 : c.gainM > 1000) ? 100 : 50, 0, 10000);
         break;
     case Field::MaxGrade: c.maxGradePct = StepValue(c.maxGradePct, dir, 1, 2, 25); break;
-    case Field::Route: c.loop = !c.loop; break;
+    case Field::Route: {
+        const int route = ((c.endless ? 2 : c.loop ? 1 : 0) + dir + 3) % 3;
+        c.loop = route == 1;
+        c.endless = route == 2;
+        break;
+    }
     case Field::Mode: settings_.mode = settings_.mode == Mode::Sim ? Mode::Erg : Mode::Sim; break;
     case Field::Target: settings_.ergW = static_cast<int>(StepValue(settings_.ergW, dir, 5, 0, kMaxTargetW)); break;
     case Field::Rider: settings_.riderKg = StepValue(settings_.riderKg, dir, 1, 30, 200); break;
     }
-    if (field <= Field::Route) MakeCourse();  // same seed, so the course keeps its character
+    selected_ = std::min(selected_, static_cast<int>(Fields().size()) - 1);  // flat terrain hides a row
+    if (field <= Field::MaxGrade) MakeCourse();  // same seed, so the course keeps its character
     else Summarize();
     Redraw();
 }
@@ -420,13 +437,17 @@ void App::Select(int dir) {
 // The gain stops at what the course can climb, so the setting always shows what it gets.
 void App::MakeCourse() {
     CourseParams& c = settings_.course;
-    c.gainM = std::min(c.gainM, std::floor(MaxGain(c) / 10) * 10);
+    if (!c.endless) c.gainM = std::min(c.gainM, std::floor(MaxGain(c) / 10) * 10);
     course_ = GenerateCourse(c);
     Summarize();
 }
 
-// A rough moving time for the course at the ERG target or else at 2.5 W/kg.
+// A rough moving time for the course at the ERG target or else at 2.5 W/kg. An endless course has none.
 void App::Summarize() {
+    if (settings_.course.endless) {
+        stats_[0].clear();
+        return;
+    }
     const int watts = settings_.mode == Mode::Erg && settings_.ergW >= 50
                           ? settings_.ergW
                           : static_cast<int>(std::lround(settings_.riderKg * 2.5 / 5)) * 5;
@@ -893,7 +914,7 @@ void App::OnButtons(uint32_t pressed) {
 
 // A held mouse button or shifter keeps stepping a number setting, after a moment. Held keys repeat by themselves.
 void App::StartRepeat(Field field, int dir) {
-    if (field == Field::Route || field == Field::Mode) return;  // toggles would flicker
+    if (field == Field::Route || field == Field::Mode) return;  // choices that cycle would flicker
     repeatField_ = field;
     repeatDir_ = dir;
     SetTimer(hwnd_, kRepeatTimer, kRepeatDelayMs, nullptr);
@@ -1092,9 +1113,11 @@ void App::WriteLog() {
         SYSTEMTIME utc;
         FileTimeToSystemTime(&ft, &utc);
         const CourseParams& c = ride_->course().params;
-        std::fprintf(log_, "# km=%.1f gain=%.0f max_grade=%.0f loop=%d seed=%u start=%04d-%02d-%02dT%02d:%02d:%02dZ\n",
-                     c.km, ride_->course().targetGain, c.maxGradePct, c.loop ? 1 : 0, c.seed, utc.wYear, utc.wMonth,
-                     utc.wDay, utc.wHour, utc.wMinute, utc.wSecond);
+        std::fprintf(log_,
+                     "# km=%.1f gain=%.0f max_grade=%.0f loop=%d endless=%d terrain=%d seed=%u "
+                     "start=%04d-%02d-%02dT%02d:%02d:%02dZ\n",
+                     c.km, ride_->course().targetGain, c.maxGradePct, c.loop ? 1 : 0, c.endless ? 1 : 0, c.terrain,
+                     c.seed, utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond);
         std::fprintf(log_, "time_s,distance_m,elevation_m,grade_pct,power_w,cadence_rpm,speed_kmh,mode,gear,target,"
                            "heart_rate_bpm\n");
     }

@@ -272,8 +272,14 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
 
     // Progress, climbing, power, calories and time along the bottom, and a button to end the ride.
     wchar_t distance[48], climbed[48], avg[16], kcal[32];
-    swprintf_s(distance, L"%.1f / %.1f", ride.distance() / 1000, length / 1000);
-    swprintf_s(climbed, L"%.0f / %.0f", ride.climbed(), ride.course().targetGain);
+    // An endless course has no totals to ride towards.
+    if (ride.course().params.endless) {
+        swprintf_s(distance, L"%.1f", ride.distance() / 1000);
+        swprintf_s(climbed, L"%.0f", ride.climbed());
+    } else {
+        swprintf_s(distance, L"%.1f / %.1f", ride.distance() / 1000, length / 1000);
+        swprintf_s(climbed, L"%.0f / %.0f", ride.climbed(), ride.course().targetGain);
+    }
     swprintf_s(avg, L"%d", ride.averagePower());
     swprintf_s(kcal, L"%.0f", ride.calories());
     const std::wstring time = Clock(ride.elapsed());
@@ -348,6 +354,7 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
         float x = p.left + 20.0f * s;
         const float chipTop = p.bottom - 52.0f * s, chipBottom = p.bottom - 18.0f * s;
         for (const std::wstring& stat : view.stats) {
+            if (stat.empty()) continue;
             const float w = TextWidth(stat, small_.get()) + 28.0f * s;
             const D2D1_RECT_F chip{x, chipTop, x + w, chipBottom};
             const float h = (chip.bottom - chip.top) / 2;
@@ -472,14 +479,16 @@ void Renderer::DrawSummary(ID2D1RenderTarget* target, const SummaryView& view) {
                  i == 3 ? accentText_.get() : text_.get());
     }
 
-    // The course, with how much of it was ridden.
+    // The course, with how much of it was ridden. Of an endless one, only the part ridden.
     const D2D1_RECT_F course{pad, top + 2 * (cardHeight + gap), size.width - pad, l.done.top - 24.0f * s};
     DrawCard(target, course);
+    const double shown = r.course().params.endless ? std::clamp(r.distance(), 1000.0, r.course().Length())
+                                                    : r.course().Length();
     wchar_t caption[64];
-    swprintf_s(caption, L"Course · %.1f km", r.course().Length() / 1000);
+    swprintf_s(caption, L"Course · %.1f km", shown / 1000);
     DrawLabel(target, caption, label_.get(), {course.left + 20.0f * s, course.top + 12.0f * s, course.right, course.top + 36.0f * s},
               muted_.get());
-    DrawProfile(target, r.course(), 0.0, r.course().Length(), r.distance(),
+    DrawProfile(target, r.course(), 0.0, shown, r.distance(),
                 {course.left + 20.0f * s, course.top + 48.0f * s, course.right - 20.0f * s, course.bottom - 16.0f * s}, 50.0,
                 false);
 
@@ -632,7 +641,7 @@ void Renderer::DrawProfile(ID2D1RenderTarget* target, const Course& course, doub
             const CourseParams& p = c.params;
             const CourseParams& q = course.params;
             if (c.fill && p.km == q.km && p.gainM == q.gainM && p.maxGradePct == q.maxGradePct && p.loop == q.loop &&
-                p.seed == q.seed && c.samples == columns && c.from == from && c.to == to && c.width == width &&
+                p.seed == q.seed && p.endless == q.endless && p.terrain == q.terrain && c.samples == columns && c.from == from && c.to == to && c.width == width &&
                 c.height == height)
                 hit = &c;
         }

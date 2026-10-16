@@ -77,6 +77,8 @@ Settings LoadSettings() {
     s.course.gainM = ReadNumber(ini, L"gain", 0, 10000, s.course.gainM);
     s.course.maxGradePct = ReadNumber(ini, L"max_grade", 2, 25, s.course.maxGradePct);
     s.course.loop = ReadNumber(ini, L"loop", 0, 1, 0) != 0;
+    s.course.endless = ReadNumber(ini, L"endless", 0, 1, 0) != 0;
+    s.course.terrain = static_cast<int>(ReadNumber(ini, L"terrain", 0, kTerrainCount - 1, s.course.terrain));
     s.riderKg = ReadNumber(ini, L"rider_kg", 30, 200, s.riderKg);
     s.ergW = static_cast<int>(ReadNumber(ini, L"erg_w", 0, 1500, s.ergW));
     wchar_t buf[64];
@@ -98,6 +100,8 @@ void SaveSettings(const Settings& s) {
     WriteNumber(ini, L"gain", s.course.gainM);
     WriteNumber(ini, L"max_grade", s.course.maxGradePct);
     WriteNumber(ini, L"loop", s.course.loop ? 1 : 0);
+    WriteNumber(ini, L"endless", s.course.endless ? 1 : 0);
+    WriteNumber(ini, L"terrain", s.course.terrain);
     WriteNumber(ini, L"rider_kg", s.riderKg);
     WriteNumber(ini, L"erg_w", s.ergW);
     WritePrivateProfileStringW(kSection, L"mode", ModeName(s.mode), ini.c_str());
@@ -116,12 +120,9 @@ bool ApplyArgs(Settings& s, const wchar_t* commandLine, std::wstring& error) {
     bool ok = true;
     for (int i = 1; i < argc && ok; ++i) {
         const wchar_t* key = argv[i];
-        if (!wcscmp(key, L"--loop")) {
-            s.course.loop = true;
-            continue;
-        }
-        if (!wcscmp(key, L"--no-loop")) {
-            s.course.loop = false;
+        if (!wcscmp(key, L"--loop") || !wcscmp(key, L"--no-loop") || !wcscmp(key, L"--endless")) {
+            s.course.loop = !wcscmp(key, L"--loop");
+            s.course.endless = !wcscmp(key, L"--endless");
             continue;
         }
         const wchar_t* value = i + 1 < argc ? argv[++i] : L"";
@@ -130,6 +131,7 @@ bool ApplyArgs(Settings& s, const wchar_t* commandLine, std::wstring& error) {
         else if (!wcscmp(key, L"--km")) ok = ParseNumber(value, 1, 500, s.course.km);
         else if (!wcscmp(key, L"--gain")) ok = ParseNumber(value, 0, 10000, s.course.gainM);
         else if (!wcscmp(key, L"--max-grade")) ok = ParseNumber(value, 2, 25, s.course.maxGradePct);
+        else if (!wcscmp(key, L"--terrain")) ok = ParseNumber(value, 0, kTerrainCount - 1, v), s.course.terrain = static_cast<int>(v);
         else if (!wcscmp(key, L"--weight")) ok = ParseNumber(value, 30, 200, s.riderKg);
         else if (!wcscmp(key, L"--mode")) ok = ParseMode(value, s.mode);
         else if (!wcscmp(key, L"--erg")) ok = ParseNumber(value, 0, 1500, v), s.ergW = static_cast<int>(v);
@@ -140,7 +142,7 @@ bool ApplyArgs(Settings& s, const wchar_t* commandLine, std::wstring& error) {
     LocalFree(argv);
     if (!ok)
         error +=
-            L"Usage: OpenCyclist.exe [--km 30] [--gain 1000] [--max-grade 10] [--loop | --no-loop]\n"
-            L"[--mode sim|erg] [--erg 200] [--weight 75] [--seed 12345] [--snapshot file.png]";
+            L"Usage: OpenCyclist.exe [--km 30] [--gain 1000] [--max-grade 10] [--loop | --no-loop | --endless]\n"
+            L"[--terrain 0-3] [--mode sim|erg] [--erg 200] [--weight 75] [--seed 12345] [--snapshot file.png]";
     return ok;
 }

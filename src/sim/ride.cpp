@@ -20,6 +20,8 @@ Ride::Ride(Course course, Mode mode, double massKg, int ergW)
 
 void Ride::Tick(double dt) {
     if (!paused_ && !finished_) {
+        // Before the height is taken, since growing the road can lift it.
+        while (course_.params.endless && course_.Length() - distance_ < kEndlessAheadM) course_.Extend();
         const double before = elevation();
         speed_ = physics::Step(speed_, power_, grade(), mass_, dt);
         distance_ = std::min(distance_ + speed_ * dt, course_.Length());

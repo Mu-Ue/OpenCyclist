@@ -20,6 +20,8 @@ constexpr int kStartGear = 10;  // 1-based
 
 constexpr double kCourseStep = 10.0;  // m between elevation samples
 constexpr double kMaxGradeChange = 0.002;  // per step, about 1 % per 50 m like real roads
+constexpr double kEndlessStretchKm = 20.0;  // an endless course grows this much at a time
+constexpr double kEndlessAheadM = 5000.0;   // and always has this much road ahead
 
 constexpr unsigned kTickMs = 250;    // ride update and trainer control rate
 constexpr int kMaxTargetW = 1500;

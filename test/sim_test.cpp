@@ -52,6 +52,36 @@ int main() {
                         Check(GenerateCourse(p).elevation == c.elevation, "repeatable", p, 0);
                     }
 
+    // Endless courses grow smoothly, stay above 0 m and come out the same for a seed.
+    for (int terrain = 0; terrain < kTerrainCount; ++terrain) {
+        CourseParams p{30, 0, 12, false, 3};
+        p.endless = true;
+        p.terrain = terrain;
+        Course c = GenerateCourse(p), again = GenerateCourse(p);
+        while (c.Length() < 200000) c.Extend(), again.Extend();
+        double sharpest = 0, lowest = 1e9, steepest = 0;
+        for (size_t i = 2; i < c.elevation.size(); ++i) {
+            const double grade = (c.elevation[i] - c.elevation[i - 1]) / kCourseStep;
+            const double prev = (c.elevation[i - 1] - c.elevation[i - 2]) / kCourseStep;
+            sharpest = std::max(sharpest, std::abs(grade - prev));
+            steepest = std::max(steepest, std::abs(grade));
+            lowest = std::min(lowest, double(c.elevation[i]));
+        }
+        Check(sharpest <= kMaxGradeChange * 1.5 + 1e-4, "endless grade change", p, sharpest * 100);
+        Check(steepest <= 0.12 + 1e-3, "endless max grade", p, steepest * 100);
+        Check(lowest >= 0, "endless below sea level", p, lowest);
+        Check(c.elevation == again.elevation, "endless repeatable", p, 0);
+        if (terrain == 0) Check(c.Gain() == 0, "flat", p, c.Gain());
+    }
+    {
+        CourseParams p{30, 0, 10, false, 5};
+        p.endless = true;
+        Ride endless(GenerateCourse(p), Mode::Erg, 84, 250);
+        endless.OnPower(250);
+        while (!endless.finished() && endless.distance() < 100000) endless.Tick(1.0);
+        if (endless.finished()) ++failures, std::printf("FAIL endless ride finished\n");
+    }
+
     const double flat = physics::SteadySpeed(250, 0.0, 84) * 3.6;
     const double climb = physics::SteadySpeed(250, 0.08, 84) * 3.6;
     if (flat < 34 || flat > 39) ++failures, std::printf("FAIL flat speed %.1f km/h\n", flat);

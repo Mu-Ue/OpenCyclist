@@ -9,7 +9,11 @@ struct CourseParams {
     double maxGradePct = 10.0;
     bool loop = false;    // ends where it starts
     uint32_t seed = 0;
+    bool endless = false;  // grows as it's ridden, ignoring km and gainM
+    int terrain = 1;       // for endless: 0 flat, 1 rolling, 2 hilly, 3 mountains
 };
+
+constexpr int kTerrainCount = 4;
 
 struct Course {
     CourseParams params;
@@ -20,6 +24,9 @@ struct Course {
     double ElevationAt(double distance) const;
     double GradeAt(double distance) const;  // fraction
     double Gain() const;
+
+    // Adds the next stretch of an endless course, joined on smoothly.
+    void Extend();
 };
 
 // Builds a road-like profile. The same params always give the same course.
