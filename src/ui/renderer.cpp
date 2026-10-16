@@ -76,8 +76,8 @@ SetupLayout LayoutSetup(D2D1_SIZE_F size, size_t rows) {
         l.rows[i] = {l.panel.left + inset, top, l.panel.right - inset, top + rowHeight - 4.0f * s};
     }
     l.start = {right - 180.0f * s, bottom - 52.0f * s, right, bottom};
-    l.reroll = {l.start.left - 172.0f * s, l.start.top, l.start.left - 12.0f * s, bottom};
-    l.devices = {l.reroll.left - 172.0f * s, l.start.top, l.reroll.left - 12.0f * s, bottom};
+    l.devices = {l.start.left - 172.0f * s, l.start.top, l.start.left - 12.0f * s, bottom};
+    l.reroll = {l.devices.left - 172.0f * s, l.start.top, l.devices.left - 12.0f * s, bottom};
     l.preview = {l.panel.right + 16.0f * s, l.panel.top, right, l.start.top - 24.0f * s};
     return l;
 }
@@ -416,7 +416,8 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
         std::wstring text(d.role);
         if (!d.name.empty()) text.append(L" · ").append(d.name);
         text.append(L" · ").append(d.status);
-        DrawLabel(target, text, label_.get(), {pad + 16.0f * s, top, l.devices.left - 16.0f * s, top + lineHeight},
+        const float textRight = (endless ? l.devices : l.reroll).left - 16.0f * s;
+        DrawLabel(target, text, label_.get(), {pad + 16.0f * s, top, textRight, top + lineHeight},
                   d.tone == Tone::Problem ? warn_.get() : d.tone == Tone::Good ? text_.get() : muted_.get());
     }
     DrawButton(target, l.devices, L"Devices", Button::Secondary, button_.get());
