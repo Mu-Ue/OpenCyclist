@@ -46,9 +46,8 @@ int main() {
                         Check(steepest <= maxGrade / 100 + 1e-4, "max grade", p, steepest * 100);
                         Check(sharpest <= kMaxGradeChange * 1.5 + 1e-4, "grade change", p, sharpest * 100);
                         Check(lowest >= 0, "below sea level", p, lowest);
-                        if (loop)
-                            Check(std::abs(c.elevation.back() - c.elevation.front()) <= tolerance, "loop closes", p,
-                                  c.elevation.back() - c.elevation.front());
+                        Check(std::abs(c.elevation.back() - c.elevation.front()) <= tolerance, "closes", p,
+                              c.elevation.back() - c.elevation.front());
                         Check(GenerateCourse(p).elevation == c.elevation, "repeatable", p, 0);
                     }
 

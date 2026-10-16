@@ -58,11 +58,11 @@ void LimitGradeChange(std::vector<double>& g) {
         g[i] = std::clamp(g[i], g[i + 1] - kMaxGradeChange, g[i + 1] + kMaxGradeChange);
 }
 
-// Maps every grade to clamp(scale * g + offset) so the climbs total `gain` and the course ends `gain - descent`
-// above its start. One scale and offset for the whole course keep it as smooth as it was. The end height only
-// grows with the offset and, with the offset solved for, the gain only grows with the scale, so two nested
-// bisections find them. Sorted grades with prefix sums make each total a pair of binary searches.
-void FitTotals(std::vector<double>& g, double gain, double descent, double maxGrade) {
+// Maps every grade to clamp(scale * g + offset) so the climbs total `gain` and the course ends at its start
+// height. One scale and offset for the whole course keep it as smooth as it was. The end height only grows with
+// the offset and, with the offset solved for, the gain only grows with the scale, so two nested bisections find
+// them. Sorted grades with prefix sums make each total a pair of binary searches.
+void FitTotals(std::vector<double>& g, double gain, double maxGrade) {
     std::vector<double> sorted(g);
     std::sort(sorted.begin(), sorted.end());
     std::vector<double> prefix(sorted.size() + 1, 0.0);
@@ -74,12 +74,11 @@ void FitTotals(std::vector<double>& g, double gain, double descent, double maxGr
         return floor * static_cast<double>(a) + scale * (prefix[b] - prefix[a]) + offset * static_cast<double>(b - a) +
                maxGrade * static_cast<double>(sorted.size() - b);
     };
-    const double net = (gain - descent) / kCourseStep;
     auto offsetFor = [&](double scale) {
         double lo = -2.0 * maxGrade - 1.0, hi = 2.0 * maxGrade + 1.0;
         for (int i = 0; i < 50; ++i) {
             const double mid = 0.5 * (lo + hi);
-            (clampedSum(scale, mid, -maxGrade) < net ? lo : hi) = mid;
+            (clampedSum(scale, mid, -maxGrade) < 0.0 ? lo : hi) = mid;
         }
         return hi;
     };
@@ -99,7 +98,7 @@ void FitTotals(std::vector<double>& g, double gain, double descent, double maxGr
 
 double MaxGain(const CourseParams& params) {
     const double length = static_cast<double>(Steps(params)) * kCourseStep;
-    return length * std::clamp(params.maxGradePct, 1.0, 25.0) / 100.0 * kHeadroom / (params.loop ? 2.0 : 1.0);
+    return length * std::clamp(params.maxGradePct, 1.0, 25.0) / 100.0 * kHeadroom / 2.0;
 }
 
 double Course::Length() const { return elevation.size() < 2 ? 0.0 : (elevation.size() - 1) * kCourseStep; }
@@ -148,11 +147,10 @@ void Course::Extend() {
 uint32_t RandomSeed() { return std::random_device{}() | 1u; }
 
 Course GenerateCourse(const CourseParams& params) {
-    // An endless course starts with one stretch. It closes like a loop, so the road doesn't drift up or down.
+    // An endless course starts with one stretch. It ends at its start height, so the road doesn't drift up or down.
     if (params.endless) {
         CourseParams stretch = params;
         stretch.km = kEndlessStretchKm;
-        stretch.loop = true;
         stretch.endless = false;
         stretch.gainM = std::min(kTerrainGain[std::clamp(params.terrain, 0, kTerrainCount - 1)], MaxGain(stretch));
         Course course = GenerateCourse(stretch);
@@ -167,27 +165,20 @@ Course GenerateCourse(const CourseParams& params) {
     const double maxGrade = std::clamp(params.maxGradePct, 1.0, 25.0) / 100.0;
     Rng rng{params.seed};
 
-    // A point-to-point course too hilly for its descents ends higher up instead, so all of the gain fits. Both
-    // route types draw the same numbers and lay out the same course, so switching only tilts the profile.
-    const double share = rng.Uniform(0.3, 1.0);
-    double descentShare = params.loop ? 1.0 : share;
+    // Every course descends as much as it climbs and ends at its start height. Loop and point to point get the
+    // same course, so the route type is only a name.
     const double gain = std::clamp(params.gainM, 0.0, MaxGain(params));
-    if (!params.loop && gain > 0.0)
-        descentShare = std::clamp(length * maxGrade * kHeadroom / gain - 1.0, 0.0, descentShare);
-    const double descent = gain * descentShare;
     course.targetGain = gain;
 
     std::vector<double> g(n, 0.0);
     if (gain > 0.0) {
         // Lay out climbs, descents, flats and rollers. Hillier courses have fewer flats, and the choice between
-        // climbing and descending leans towards where the course should be by now.
+        // climbing and descending leans back towards the start height.
         const double hilliness = gain / length;
         const double flatChance = std::clamp(1.0 - hilliness * 40.0, 0.1, 0.8);
-        const double endHeight = gain * (1.0 - share);
         const double longest = std::clamp(length / 4.0, 600.0, 8000.0);
         double height = 0.0;
         for (size_t i = 0; i < n;) {
-            const double expected = endHeight * static_cast<double>(i) / static_cast<double>(n);
             const double r = rng.Uniform(0.0, 1.0);
             double meters, grade = 0.0, rollerAmp = 0.0, rollerPeriod = 1.0;
             if (r < flatChance) {
@@ -198,7 +189,7 @@ Course GenerateCourse(const CourseParams& params) {
                 rollerAmp = rng.Uniform(0.02, 0.05);
                 rollerPeriod = rng.Uniform(300.0, 900.0);
             } else {
-                const double climbChance = std::clamp(0.5 + (expected - height) / (gain + 1.0), 0.15, 0.85);
+                const double climbChance = std::clamp(0.5 - height / (gain + 1.0), 0.15, 0.85);
                 meters = std::exp(rng.Uniform(std::log(400.0), std::log(longest)));
                 grade = rng.Uniform(0.03, 0.08) * (rng.Uniform(0.0, 1.0) < climbChance ? 1.0 : -1.0);
             }
@@ -221,7 +212,7 @@ Course GenerateCourse(const CourseParams& params) {
         // the totals are exact.
         for (int pass = 0; pass < 6; ++pass) {
             LimitGradeChange(g);
-            FitTotals(g, gain, descent, maxGrade);
+            FitTotals(g, gain, maxGrade);
         }
     }
 
