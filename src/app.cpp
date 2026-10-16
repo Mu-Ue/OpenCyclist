@@ -408,7 +408,9 @@ std::wstring App::Value(Field field) const {
 void App::Change(Field field, int dir) {
     CourseParams& c = settings_.course;
     switch (field) {
-    case Field::Terrain: c.terrain = std::clamp(c.terrain + dir, 0, kTerrainCount - 1); break;
+    case Field::Terrain:
+        c.terrain = (std::clamp(c.terrain, 0, kTerrainCount - 1) + dir + kTerrainCount) % kTerrainCount;
+        break;
     case Field::Km: c.km = StepValue(c.km, dir, (dir > 0 ? c.km >= 10 : c.km > 10) ? 5 : 1, 1, 500); break;
     case Field::Gain:
         c.gainM = StepValue(c.gainM, dir, (dir > 0 ? c.gainM >= 1000 : c.gainM > 1000) ? 100 : 50, 0, 10000);
