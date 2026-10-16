@@ -26,6 +26,7 @@ public:
     void NextMode();
     void SetMode(Mode mode) { mode_ = mode; }
     void TogglePause() { paused_ = !paused_; }
+    void SetErgW(int watts);
 
     TrainerTarget Target() const;
 

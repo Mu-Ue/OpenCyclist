@@ -420,7 +420,7 @@ void App::Change(Field field, int dir) {
         break;
     }
     case Field::Mode: settings_.mode = settings_.mode == Mode::Sim ? Mode::Erg : Mode::Sim; break;
-    case Field::Target: settings_.ergW = static_cast<int>(StepValue(settings_.ergW, dir, 5, 0, kMaxTargetW)); break;
+    case Field::Target: settings_.ergW = static_cast<int>(StepValue(settings_.ergW, dir, 5, 0, kMaxErgW)); break;
     case Field::Rider: settings_.riderKg = StepValue(settings_.riderKg, dir, 1, 30, 200); break;
     }
     selected_ = std::min(selected_, static_cast<int>(Fields().size()) - 1);  // flat terrain hides a row
@@ -795,7 +795,17 @@ void App::OnClick(D2D1_POINT_2F p) {
     auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
     if (ride_) {
         if (!confirmEnd_) {
-            if (inside(LayoutRideEnd(Size()))) AskToEnd();
+            const RideLayout l = LayoutRide(Size(), ride_->mode() == Mode::Erg);
+            if (inside(l.end)) return AskToEnd();
+            // The arrows over and under the ERG target's digits step it by 100, 10 or 1 W.
+            if (ride_->mode() != Mode::Erg) return;
+            for (int i = 0, step = 100; i < 3; ++i, step /= 10) {
+                const int dir = inside(l.up[i]) ? 1 : inside(l.down[i]) ? -1 : 0;
+                if (!dir) continue;
+                ride_->SetErgW(ride_->ergW() + dir * step);
+                trainer_->SetTarget(ride_->Target());
+                Redraw();
+            }
             return;
         }
         const ConfirmLayout c = LayoutConfirm(Size());

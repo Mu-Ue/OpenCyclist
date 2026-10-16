@@ -16,7 +16,8 @@ double GearRatio(int gear) {
 }  // namespace
 
 Ride::Ride(Course course, Mode mode, double massKg, int ergW)
-    : course_(std::move(course)), mode_(mode), mass_(massKg), ergW_(ergW), gear_(kStartGear) {}
+    : course_(std::move(course)), mode_(mode), mass_(massKg), ergW_(std::clamp(ergW, 0, kMaxErgW)),
+      gear_(kStartGear) {}
 
 void Ride::Tick(double dt) {
     if (!paused_ && !finished_) {
@@ -64,9 +65,11 @@ void Ride::Adjust(int dir, bool big) {
         gear_ = std::clamp(gear_ + dir * (big ? 4 : 1), 1, kGearCount);
         simTarget_ = SimPower();
         break;
-    case Mode::Erg: ergW_ = std::clamp(ergW_ + dir * (big ? 25 : 5), 0, kMaxTargetW); break;
+    case Mode::Erg: SetErgW(ergW_ + dir * (big ? 25 : 5)); break;
     }
 }
+
+void Ride::SetErgW(int watts) { ergW_ = std::clamp(watts, 0, kMaxErgW); }
 
 void Ride::NextMode() {
     mode_ = mode_ == Mode::Sim ? Mode::Erg : Mode::Sim;

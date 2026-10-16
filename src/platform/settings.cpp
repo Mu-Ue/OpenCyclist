@@ -9,6 +9,8 @@
 #include <cwchar>
 #include <iterator>
 
+#include "config.h"
+
 namespace {
 
 constexpr wchar_t kSection[] = L"ride";
@@ -80,7 +82,7 @@ Settings LoadSettings() {
     s.course.endless = ReadNumber(ini, L"endless", 0, 1, 0) != 0;
     s.course.terrain = static_cast<int>(ReadNumber(ini, L"terrain", 0, kTerrainCount - 1, s.course.terrain));
     s.riderKg = ReadNumber(ini, L"rider_kg", 30, 200, s.riderKg);
-    s.ergW = static_cast<int>(ReadNumber(ini, L"erg_w", 0, 1500, s.ergW));
+    s.ergW = static_cast<int>(ReadNumber(ini, L"erg_w", 0, kMaxErgW, s.ergW));
     wchar_t buf[64];
     GetPrivateProfileStringW(kSection, L"mode", L"", buf, 64, ini.c_str());
     ParseMode(buf, s.mode);
@@ -134,7 +136,7 @@ bool ApplyArgs(Settings& s, const wchar_t* commandLine, std::wstring& error) {
         else if (!wcscmp(key, L"--terrain")) ok = ParseNumber(value, 0, kTerrainCount - 1, v), s.course.terrain = static_cast<int>(v);
         else if (!wcscmp(key, L"--weight")) ok = ParseNumber(value, 30, 200, s.riderKg);
         else if (!wcscmp(key, L"--mode")) ok = ParseMode(value, s.mode);
-        else if (!wcscmp(key, L"--erg")) ok = ParseNumber(value, 0, 1500, v), s.ergW = static_cast<int>(v);
+        else if (!wcscmp(key, L"--erg")) ok = ParseNumber(value, 0, kMaxErgW, v), s.ergW = static_cast<int>(v);
         else if (!wcscmp(key, L"--seed")) ok = ParseNumber(value, 1, 4294967295.0, v), s.course.seed = static_cast<uint32_t>(v);
         else ok = false;
         if (!ok) error = L"Bad argument: " + std::wstring(key) + L" " + value + L"\n\n";

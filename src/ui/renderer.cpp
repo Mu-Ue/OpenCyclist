@@ -113,9 +113,24 @@ SummaryLayout LayoutSummary(D2D1_SIZE_F size) {
     return l;
 }
 
-D2D1_RECT_F LayoutRideEnd(D2D1_SIZE_F size) {
-    const float s = Scale(size, true), pad = 24.0f * s;
-    return {size.width - pad - 170.0f * s, size.height - pad - 76.0f * s, size.width - pad, size.height - pad};
+RideLayout LayoutRide(D2D1_SIZE_F size, bool erg) {
+    const float s = Scale(size, true), pad = 24.0f * s, gap = 12.0f * s;
+    RideLayout l;
+    l.end = {size.width - pad - 170.0f * s, size.height - pad - 76.0f * s, size.width - pad, size.height - pad};
+    l.next = {pad, pad + 112.0f * s + gap, size.width - pad, std::round(size.height * 0.585f)};
+    if (!erg) return l;
+    l.target = {l.next.right - 260.0f * s, l.next.top, l.next.right, l.next.bottom};
+    l.next.right = l.target.left - gap;
+    // Three digit columns, a little left of center to leave room for the unit.
+    const float column = 64.0f * s, space = 8.0f * s, arrow = 44.0f * s, digits = 96.0f * s;
+    const float left = (l.target.left + l.target.right) / 2 - 12.0f * s - (3 * column + 2 * space) / 2;
+    const float top = (l.target.top + 36.0f * s + l.target.bottom - 12.0f * s) / 2 - (2 * arrow + digits) / 2;
+    for (int i = 0; i < 3; ++i) {
+        const float x = left + (column + space) * i;
+        l.up[i] = {x, top, x + column, top + arrow};
+        l.down[i] = {x, top + arrow + digits, x + column, top + 2 * arrow + digits};
+    }
+    return l;
 }
 
 ConfirmLayout LayoutConfirm(D2D1_SIZE_F size) {
@@ -184,6 +199,7 @@ float Renderer::Prepare(ID2D1RenderTarget* target, bool grow) {
         button_ = MakeFormat(dwrite_.get(), textFont_, DWRITE_FONT_WEIGHT_SEMI_BOLD, 17.0f * s);
         title_ = MakeFormat(dwrite_.get(), numberFont_, DWRITE_FONT_WEIGHT_SEMI_BOLD, 30.0f * s);
         heading_ = MakeFormat(dwrite_.get(), numberFont_, DWRITE_FONT_WEIGHT_SEMI_BOLD, 23.0f * s);
+        digit_ = MakeFormat(dwrite_.get(), numberFont_, DWRITE_FONT_WEIGHT_SEMI_BOLD, 76.0f * s);
         scale_ = s;
     }
     const D2D1_SIZE_F size = target->GetSize();
@@ -206,18 +222,17 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     const float s = Prepare(target, true), pad = 24.0f * s, gap = 12.0f * s;
     const D2D1_SIZE_F size = target->GetSize();
 
-    // Live numbers in cards, with heart rate when there is a monitor. The last one depends on the mode.
-    wchar_t power[16], heart[16], cadence[16], speed[16], grade[16], last[16];
+    // Live numbers in cards, with heart rate when there is a monitor, and the gear in Sim mode.
+    const bool erg = ride.mode() == Mode::Erg;
+    const RideLayout layout = LayoutRide(size, erg);
+    wchar_t power[16], heart[16], cadence[16], speed[16], grade[16], gear[16];
     swprintf_s(power, L"%d", ride.power());
     if (ride.heartRate() > 0) swprintf_s(heart, L"%d", ride.heartRate());
     else wcscpy_s(heart, L"–");
     swprintf_s(cadence, L"%.0f", ride.cadence());
     swprintf_s(speed, L"%.1f", ride.speed() * 3.6);
     swprintf_s(grade, L"%.1f", ride.grade() * 100 + 0.0);  // + 0.0 turns -0.0 into 0.0
-    const wchar_t* lastLabel = L"Gear";
-    const wchar_t* lastUnit = L"";
-    if (ride.mode() == Mode::Erg) swprintf_s(last, L"%d", ride.ergW()), lastLabel = L"ERG target", lastUnit = L"W";
-    else swprintf_s(last, L"%d", ride.gear());
+    swprintf_s(gear, L"%d", ride.gear());
     struct Metric {
         std::wstring_view label, value, unit;
         ID2D1Brush* brush;
@@ -229,7 +244,7 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     metrics[count++] = {L"Cadence", cadence, L"rpm", text_.get()};
     metrics[count++] = {L"Speed", speed, L"km/h", text_.get()};
     metrics[count++] = {L"Grade", grade, L"%", text_.get()};
-    metrics[count++] = {lastLabel, last, lastUnit, text_.get()};
+    if (!erg) metrics[count++] = {L"Gear", gear, L"", text_.get()};
     const float cardWidth = (size.width - 2 * pad - gap * (count - 1)) / count;
     const float metricsBottom = pad + 112.0f * s;
     for (int i = 0; i < count; ++i) {
@@ -242,7 +257,7 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
 
     // The next 2 km in detail, starting a little behind the rider and colored by grade.
     const float footerTop = size.height - pad - 76.0f * s;
-    const D2D1_RECT_F next{pad, metricsBottom + gap, size.width - pad, std::round(size.height * 0.585f)};
+    const D2D1_RECT_F next = layout.next;
     const D2D1_RECT_F whole{pad, next.bottom + gap, size.width - pad, footerTop - gap};
     const double length = ride.course().Length();
     const double from = std::clamp(ride.distance() - 250.0, 0.0, std::max(0.0, length - 2250.0));
@@ -261,6 +276,27 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     if (!status.empty()) DrawPill(target, pill, status, warn_.get());
     else if (ride.finished()) DrawPill(target, pill, L"Finished", good_.get());
     else if (ride.paused()) DrawPill(target, pill, L"Paused · Space or Z to go on", text_.get());
+
+    // The ERG target, a digit at a time, with leading zeros dimmed.
+    if (erg) {
+        const D2D1_RECT_F t = layout.target;
+        DrawCard(target, t);
+        DrawLabel(target, L"ERG target", label_.get(), {t.left + 18.0f * s, t.top + 10.0f * s, t.right, t.top + 34.0f * s},
+                  muted_.get());
+        const int w = ride.ergW();
+        const wchar_t digits[3] = {wchar_t(L'0' + w / 100), wchar_t(L'0' + w / 10 % 10), wchar_t(L'0' + w % 10)};
+        for (int i = 0; i < 3; ++i) {
+            const D2D1_RECT_F up = layout.up[i], down = layout.down[i];
+            DrawArrow(target, up, true);
+            DrawArrow(target, down, false);
+            const bool leading = (i == 0 && w < 100) || (i == 1 && w < 10);
+            DrawLabel(target, {&digits[i], 1}, digit_.get(), {up.left, up.bottom, up.right, down.top},
+                      leading ? faint_.get() : accentText_.get(), DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        DrawLabel(target, L"W", heading_.get(),
+                  {layout.up[2].right + 10.0f * s, layout.up[2].bottom, t.right - 12.0f * s, layout.down[2].top},
+                  muted_.get());
+    }
 
     // The whole course.
     DrawCard(target, whole);
@@ -283,7 +319,7 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     swprintf_s(avg, L"%d", ride.averagePower());
     swprintf_s(kcal, L"%.0f", ride.calories());
     const std::wstring time = Clock(ride.elapsed());
-    const D2D1_RECT_F end = LayoutRideEnd(size);
+    const D2D1_RECT_F end = layout.end;
     const D2D1_RECT_F footer{pad, footerTop, end.left - gap, size.height - pad};
     DrawCard(target, footer);
     DrawButton(target, end, L"End ride", Button::Secondary, button_.get());
@@ -689,6 +725,23 @@ void Renderer::DrawButton(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstri
         target->DrawRoundedRectangle(D2D1::RoundedRect(Inset(box, 0.5f, 0.5f), radius, radius), border_.get(), 1.0f);
     }
     DrawLabel(target, text, format, box, label, DWRITE_TEXT_ALIGNMENT_CENTER);
+}
+
+// A button with a triangle pointing up or down.
+void Renderer::DrawArrow(ID2D1RenderTarget* target, D2D1_RECT_F box, bool up) {
+    const float s = scale_, radius = 10.0f * s;
+    target->FillRoundedRectangle(D2D1::RoundedRect(Inset(box, 0, 3.0f * s), radius, radius), raised_.get());
+    const float cx = (box.left + box.right) / 2, cy = (box.top + box.bottom) / 2, w = 11.0f * s, h = 7.0f * s;
+    winrt::com_ptr<ID2D1PathGeometry> path;
+    winrt::com_ptr<ID2D1GeometrySink> sink;
+    winrt::check_hresult(factory_->CreatePathGeometry(path.put()));
+    winrt::check_hresult(path->Open(sink.put()));
+    sink->BeginFigure({cx, up ? cy - h : cy + h}, D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine({cx + w, up ? cy + h : cy - h});
+    sink->AddLine({cx - w, up ? cy + h : cy - h});
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    winrt::check_hresult(sink->Close());
+    target->FillGeometry(path.get(), text_.get());
 }
 
 // A short message in a rounded tag tinted with its color.

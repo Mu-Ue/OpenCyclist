@@ -25,5 +25,6 @@ constexpr double kEndlessAheadM = 5000.0;   // and always has this much road ahe
 
 constexpr unsigned kTickMs = 250;    // ride update and trainer control rate
 constexpr int kMaxTargetW = 1500;
+constexpr int kMaxErgW = 999;  // the ERG target has three digits
 constexpr double kRerollBeforeM = 100.0;  // a running ride can be rerolled only this early
 constexpr unsigned kHoldMs = 2000;          // controller buttons that act when held, such as A to reroll

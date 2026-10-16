@@ -88,8 +88,12 @@ struct SummaryLayout {
 
 SummaryLayout LayoutSummary(D2D1_SIZE_F size);
 
-// The ride screen's button to end the ride, and the question that follows, in DIPs.
-D2D1_RECT_F LayoutRideEnd(D2D1_SIZE_F size);
+// The ride screen's parts that take clicks, in DIPs, and the question before ending the ride. In ERG mode the
+// target sits right of the road ahead, with arrows over and under its three digits.
+struct RideLayout {
+    D2D1_RECT_F next{}, target{}, up[3]{}, down[3]{}, end{};
+};
+RideLayout LayoutRide(D2D1_SIZE_F size, bool erg);
 struct ConfirmLayout {
     D2D1_RECT_F box{}, yes{}, no{};
 };
@@ -119,6 +123,7 @@ private:
                      D2D1_RECT_F box, double minSpan, bool graded);
     void DrawButton(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring_view text, Button kind,
                     IDWriteTextFormat* format, bool enabled = true);
+    void DrawArrow(ID2D1RenderTarget* target, D2D1_RECT_F box, bool up);
     void DrawPill(ID2D1RenderTarget* target, D2D1_POINT_2F center, std::wstring_view text, ID2D1Brush* brush);
     void DrawDot(ID2D1RenderTarget* target, D2D1_POINT_2F center, Tone tone);
     ID2D1SolidColorBrush* ToneBrush(Tone tone) const;
@@ -133,7 +138,7 @@ private:
     winrt::com_ptr<IDWriteTypography> tabular_;  // digits of one width, so live numbers don't jiggle
     // Text sizes follow the layout scale; the formats are remade when it changes.
     float scale_ = 0.0f;
-    winrt::com_ptr<IDWriteTextFormat> label_, small_, row_, title_, heading_, button_;
+    winrt::com_ptr<IDWriteTextFormat> label_, small_, row_, title_, heading_, button_, digit_;
     // Brushes belong to one target; they're remade when the target changes. Holding it keeps its address unique.
     winrt::com_ptr<ID2D1RenderTarget> brushTarget_;
     winrt::com_ptr<ID2D1SolidColorBrush> background_, surface_, raised_, border_, text_, muted_, faint_, accent_, accentText_,
