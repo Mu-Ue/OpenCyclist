@@ -144,6 +144,27 @@ void Course::Extend() {
         for (float& x : elevation) x -= static_cast<float>(lowest);
 }
 
+// Even swells of a few sizes, from flat to mountains, over one stretch.
+Course TerrainPreview(int terrain) {
+    struct Swell {
+        double height, count;
+    };
+    static constexpr Swell kSwells[kTerrainCount][2] = {
+        {{0, 1}, {0, 1}}, {{20, 9}, {10, 3}}, {{140, 3}, {30, 10}}, {{550, 1}, {60, 5}}};
+    Course course;
+    course.params.endless = true;
+    course.params.terrain = std::clamp(terrain, 0, kTerrainCount - 1);
+    const size_t n = Steps({.km = kEndlessStretchKm});
+    course.elevation.resize(n + 1);
+    for (size_t i = 0; i <= n; ++i) {
+        const double x = 2.0 * std::numbers::pi * static_cast<double>(i) / static_cast<double>(n);
+        double e = 0.0;
+        for (const Swell& s : kSwells[course.params.terrain]) e += s.height * 0.5 * (1.0 - std::cos(s.count * x));
+        course.elevation[i] = static_cast<float>(e);
+    }
+    return course;
+}
+
 uint32_t RandomSeed() { return std::random_device{}() | 1u; }
 
 Course GenerateCourse(const CourseParams& params) {

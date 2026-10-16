@@ -357,7 +357,9 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
 void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
     const float s = Prepare(target);
     const SetupLayout l = LayoutSetup(target->GetSize(), view.rows.size());
-    DrawHeader(target, kAppName, L"↑↓ choose · ←→ change · R new course · D devices · Enter start · F11 full screen");
+    const bool endless = view.course && view.course->params.endless;
+    DrawHeader(target, kAppName, endless ? L"↑↓ choose · ←→ change · D devices · Enter start · F11 full screen"
+                                         : L"↑↓ choose · ←→ change · R new course · D devices · Enter start · F11 full screen");
 
     // Settings on the left. The selected one is highlighted, with arrows to change it.
     DrawCard(target, l.panel);
@@ -400,7 +402,8 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
             x += w + 8.0f * s;
         }
         DrawProfile(target, *view.course, 0.0, view.course->Length(), -1.0,
-                    {p.left + 20.0f * s, p.top + 52.0f * s, p.right - 20.0f * s, chipTop - 20.0f * s}, 50.0, false);
+                    {p.left + 20.0f * s, p.top + 52.0f * s, p.right - 20.0f * s, chipTop - 20.0f * s},
+                    endless ? 700.0 : 50.0, false);  // terrains on one scale, so mountains look bigger than rollers
     }
 
     // Devices at the bottom left, one line each, buttons at the bottom right.
@@ -417,7 +420,7 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
                   d.tone == Tone::Problem ? warn_.get() : d.tone == Tone::Good ? text_.get() : muted_.get());
     }
     DrawButton(target, l.devices, L"Devices", Button::Secondary, button_.get());
-    DrawButton(target, l.reroll, L"New course", Button::Secondary, button_.get());
+    if (!endless) DrawButton(target, l.reroll, L"New course", Button::Secondary, button_.get());
     DrawButton(target, l.start, L"Start ride", Button::Primary, button_.get());
 }
 

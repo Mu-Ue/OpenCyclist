@@ -32,6 +32,9 @@ struct Course {
 // Builds a road-like profile. The same params always give the same course.
 Course GenerateCourse(const CourseParams& params);
 
+// A generic look at a terrain, for showing what an endless course will be like.
+Course TerrainPreview(int terrain);
+
 // The most a course can climb, from its length and max grade.
 double MaxGain(const CourseParams& params);
 

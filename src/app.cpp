@@ -438,7 +438,7 @@ void App::Select(int dir) {
 void App::MakeCourse() {
     CourseParams& c = settings_.course;
     if (!c.endless) c.gainM = std::min(c.gainM, std::floor(MaxGain(c) / 10) * 10);
-    course_ = GenerateCourse(c);
+    course_ = c.endless ? TerrainPreview(c.terrain) : GenerateCourse(c);
     Summarize();
 }
 
@@ -459,6 +459,7 @@ void App::Summarize() {
 }
 
 void App::Reroll() {
+    if (settings_.course.endless) return;  // a new road comes with every ride anyway
     settings_.course.seed = RandomSeed();
     MakeCourse();
     Redraw();
@@ -472,7 +473,10 @@ void App::KeepRideSettings() {
 
 void App::Start() {
     SaveSettings(settings_);
-    ride_ = std::make_unique<Ride>(course_, settings_.mode, settings_.riderKg + kBikeKg, settings_.ergW);
+    // An endless road is new every ride. The setup screen only shows what its terrain is like.
+    if (settings_.course.endless) settings_.course.seed = RandomSeed();
+    const Course course = settings_.course.endless ? GenerateCourse(settings_.course) : course_;
+    ride_ = std::make_unique<Ride>(course, settings_.mode, settings_.riderKg + kBikeKg, settings_.ergW);
     ride_->OnPower(power_);
     ride_->OnCadence(cadence_);
     ride_->OnHeartRate(Saved(ble::Role::HeartRate).address ? bpm_ : -1);
