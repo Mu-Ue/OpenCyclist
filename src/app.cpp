@@ -48,7 +48,8 @@ std::wstring_view RoleName(ble::Role role) {
 // ERG mode. The course settings come before Mode.
 enum class Field { Route, Km, Terrain, Gain, MaxGrade, Mode, Target, Rider };
 
-constexpr const wchar_t* kTerrainNames[kTerrainCount] = {L"Flat", L"Rolling", L"Hilly", L"Mountains"};
+constexpr const wchar_t* kTerrainNames[kTerrainCount] = {L"Flat", L"Rolling (Randomized)", L"Hilly (Randomized)",
+                                                         L"Mountains (Randomized)"};
 
 // The next value up or down from v on a grid of `step`, so odd values from the ini snap onto it.
 double StepValue(double v, int dir, double step, double lo, double hi) {
@@ -395,7 +396,7 @@ std::wstring App::Value(Field field) const {
     case Field::Gain: swprintf_s(buf, L"%g m", c.gainM); break;
     case Field::MaxGrade: swprintf_s(buf, L"%g %%", c.maxGradePct); break;
     case Field::Terrain: return kTerrainNames[std::clamp(c.terrain, 0, kTerrainCount - 1)];
-    case Field::Route: return c.endless ? L"Endless" : c.loop ? L"Loop" : L"Point to point";
+    case Field::Route: return c.endless ? L"Infinite" : c.loop ? L"Loop" : L"Point to point";
     case Field::Mode: return settings_.mode == Mode::Erg ? L"ERG" : L"Sim";
     case Field::Target: swprintf_s(buf, L"%d W", settings_.ergW); break;
     case Field::Rider: swprintf_s(buf, L"%g kg", settings_.riderKg); break;
