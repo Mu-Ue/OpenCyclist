@@ -797,6 +797,11 @@ void App::OnClick(D2D1_POINT_2F p) {
         if (!confirmEnd_) {
             const RideLayout l = LayoutRide(Size(), ride_->mode() == Mode::Erg);
             if (inside(l.end)) return AskToEnd();
+            if (inside(l.pause)) {
+                ride_->TogglePause();
+                trainer_->SetTarget(ride_->Target());
+                return Redraw();
+            }
             // The arrows over and under the ERG target's digits step it by 100, 10 or 1 W.
             if (ride_->mode() != Mode::Erg) return;
             for (int i = 0, step = 100; i < 3; ++i, step /= 10) {

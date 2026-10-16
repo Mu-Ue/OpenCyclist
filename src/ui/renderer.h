@@ -91,7 +91,7 @@ SummaryLayout LayoutSummary(D2D1_SIZE_F size);
 // The ride screen's parts that take clicks, in DIPs, and the question before ending the ride. In ERG mode the
 // target sits right of the road ahead, with arrows over and under its three digits.
 struct RideLayout {
-    D2D1_RECT_F next{}, target{}, up[3]{}, down[3]{}, end{};
+    D2D1_RECT_F next{}, target{}, up[3]{}, down[3]{}, pause{}, end{};
 };
 RideLayout LayoutRide(D2D1_SIZE_F size, bool erg);
 struct ConfirmLayout {

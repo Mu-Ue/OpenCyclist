@@ -116,7 +116,8 @@ SummaryLayout LayoutSummary(D2D1_SIZE_F size) {
 RideLayout LayoutRide(D2D1_SIZE_F size, bool erg) {
     const float s = Scale(size, true), pad = 24.0f * s, gap = 12.0f * s;
     RideLayout l;
-    l.end = {size.width - pad - 170.0f * s, size.height - pad - 76.0f * s, size.width - pad, size.height - pad};
+    l.end = {size.width - pad - 140.0f * s, size.height - pad - 76.0f * s, size.width - pad, size.height - pad};
+    l.pause = {l.end.left - gap - 140.0f * s, l.end.top, l.end.left - gap, l.end.bottom};
     l.next = {pad, pad + 112.0f * s + gap, size.width - pad, std::round(size.height * 0.585f)};
     if (!erg) return l;
     l.target = {l.next.right - 260.0f * s, l.next.top, l.next.right, l.next.bottom};
@@ -306,7 +307,7 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
                 {whole.left + 18.0f * s, whole.top + 40.0f * s, whole.right - 18.0f * s, whole.bottom - 12.0f * s}, 50.0,
                 false);
 
-    // Progress, climbing, power, calories and time along the bottom, and a button to end the ride.
+    // Progress, climbing, power, calories and time along the bottom, and buttons to pause and end the ride.
     wchar_t distance[48], climbed[48], avg[16], kcal[32];
     // An endless course has no totals to ride towards.
     if (ride.course().params.endless) {
@@ -319,10 +320,10 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
     swprintf_s(avg, L"%d", ride.averagePower());
     swprintf_s(kcal, L"%.0f", ride.calories());
     const std::wstring time = Clock(ride.elapsed());
-    const D2D1_RECT_F end = layout.end;
-    const D2D1_RECT_F footer{pad, footerTop, end.left - gap, size.height - pad};
+    const D2D1_RECT_F footer{pad, footerTop, layout.pause.left - gap, size.height - pad};
     DrawCard(target, footer);
-    DrawButton(target, end, L"End ride", Button::Secondary, button_.get());
+    DrawButton(target, layout.pause, ride.paused() ? L"Resume" : L"Pause", Button::Secondary, button_.get());
+    DrawButton(target, layout.end, L"End ride", Button::Secondary, button_.get());
     const Metric totals[] = {{L"Distance", distance, L"km", text_.get()},
                              {L"Climbed", climbed, L"m", text_.get()},
                              {L"Average power", avg, L"W", text_.get()},
