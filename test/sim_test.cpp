@@ -56,6 +56,9 @@ int main() {
     const double climb = physics::SteadySpeed(250, 0.08, 84) * 3.6;
     if (flat < 34 || flat > 39) ++failures, std::printf("FAIL flat speed %.1f km/h\n", flat);
     if (climb < 11 || climb > 15) ++failures, std::printf("FAIL 8%% speed %.1f km/h\n", climb);
+    // An easy 120 W for 78 kg on a road bike, solo on a usual day.
+    const double easy = physics::SteadySpeed(120, 0.0, 78 + kBikeKg) * 3.6;
+    if (easy < 25 || easy > 27.5) ++failures, std::printf("FAIL 120 W speed %.1f km/h\n", easy);
 
     // A whole ride at a steady 250 W, 84 kg, over 30 km with 1000 m of climbing.
     Ride ride(GenerateCourse({30, 1000, 10, false, 7}), Mode::Erg, 84, 250);

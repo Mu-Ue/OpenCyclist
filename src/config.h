@@ -4,9 +4,9 @@ constexpr wchar_t kAppName[] = L"OpenCyclist";
 
 // Physics of the simulated outdoor bike.
 constexpr double kGravity = 9.81;           // m/s²
-constexpr double kAirDensity = 1.2;         // kg/m³
-constexpr double kCdA = 0.32;               // m², on the hoods
-constexpr double kCrr = 0.004;              // road tyres on asphalt
+constexpr double kAirDensity = 1.225;       // kg/m³, 15 °C at sea level
+constexpr double kCdA = 0.36;               // m², a rider on the hoods, with a light breeze
+constexpr double kCrr = 0.005;              // good road tyres on real asphalt
 constexpr double kDrivetrainLoss = 0.03;    // of pedal power
 constexpr double kBikeKg = 7.5;              // a carbon road bike
 constexpr double kWheelInertiaKg = 1.0;     // spinning wheels, as extra mass
