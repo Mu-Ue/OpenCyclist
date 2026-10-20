@@ -86,6 +86,8 @@ Settings LoadSettings() {
     wchar_t buf[64];
     GetPrivateProfileStringW(kSection, L"mode", L"", buf, 64, ini.c_str());
     ParseMode(buf, s.mode);
+    GetPrivateProfileStringW(kSection, L"board", L"", buf, 64, ini.c_str());
+    s.board = buf;
     for (size_t i = 0; i < std::size(kDeviceKeys); ++i) {
         GetPrivateProfileStringW(kSection, kDeviceKeys[i][0], L"", buf, 64, ini.c_str());
         s.devices[i].address = _wcstoui64(buf, nullptr, 16);
@@ -107,6 +109,7 @@ void SaveSettings(const Settings& s) {
     WriteNumber(ini, L"rider_kg", s.riderKg);
     WriteNumber(ini, L"erg_w", s.ergW);
     WritePrivateProfileStringW(kSection, L"mode", ModeName(s.mode), ini.c_str());
+    if (!s.board.empty()) WritePrivateProfileStringW(kSection, L"board", s.board.c_str(), ini.c_str());
     for (size_t i = 0; i < std::size(kDeviceKeys); ++i) {
         wchar_t buf[32];
         swprintf_s(buf, L"%llX", static_cast<unsigned long long>(s.devices[i].address));

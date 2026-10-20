@@ -18,10 +18,11 @@ constexpr UINT32 kGrades[] = {0x2E2E2E, 0x404040, 0x5E5E5E, 0x838383, 0xABABAB, 
 constexpr double kGradeSteps[] = {-0.02, 0.03, 0.06, 0.09, 0.12};  // where each grade shade starts
 
 // Layout sizes are in DIPs for a 1280 x 720 window and shrink with it. Only the ride screen grows past that, to be
-// read from the bike; the menus keep their size and spread out instead.
+// read from the bike, and more slowly than the window so the graphs take the rest. The menus keep their size and
+// spread out instead.
 float Scale(D2D1_SIZE_F size, bool grow = false) {
     const float fit = std::min(size.width / 1280.0f, size.height / 720.0f);
-    return std::max(0.1f, grow ? fit : std::min(fit, 1.0f));
+    return std::max(0.1f, grow && fit > 1.0f ? std::sqrt(fit) : std::min(fit, 1.0f));
 }
 
 bool HasFont(IDWriteFactory* dwrite, const wchar_t* family) {
@@ -56,6 +57,20 @@ double NiceStep(double raw) {
 
 D2D1_RECT_F Inset(D2D1_RECT_F r, float x, float y) { return {r.left + x, r.top + y, r.right - x, r.bottom - y}; }
 
+// The ride screen's tiles and graphs by name, in the order of their enums.
+struct TileName {
+    std::wstring_view label, unit;
+};
+constexpr TileName kTileNames[] = {
+    {L"Power", L"W"},         {L"Cadence", L"rpm"},       {L"Speed", L"km/h"},
+    {L"Grade", L"%"},         {L"Gear", L""},             {L"Heart rate", L"bpm"},
+    {L"Average heart rate", L"bpm"}, {L"Max power", L"W"}, {L"Average cadence", L"rpm"},
+    {L"Distance", L"km"},     {L"Climbed", L"m"},         {L"Average power", L"W"},
+    {L"Calories", L"kcal"},   {L"Time", L""}};
+static_assert(std::size(kTileNames) == RideLayout::kTiles);
+constexpr std::wstring_view kGraphNames[] = {L"Next 2 km", L"Course"};
+static_assert(std::size(kGraphNames) == RideLayout::kGraphs);
+
 std::wstring Clock(double seconds) {
     const int t = static_cast<int>(seconds);
     wchar_t buf[16];
@@ -79,6 +94,8 @@ SetupLayout LayoutSetup(D2D1_SIZE_F size, size_t rows) {
     l.devices = {l.start.left - 172.0f * s, l.start.top, l.start.left - 12.0f * s, bottom};
     l.reroll = {l.devices.left - 172.0f * s, l.start.top, l.devices.left - 12.0f * s, bottom};
     l.preview = {l.panel.right + 16.0f * s, l.panel.top, right, l.start.top - 24.0f * s};
+    // Past rides fill the rest of the left side, above a line for each device.
+    l.history = {l.panel.left, l.panel.bottom + 16.0f * s, l.panel.right, bottom - 3 * 22.0f * s - 16.0f * s};
     return l;
 }
 
@@ -113,15 +130,56 @@ SummaryLayout LayoutSummary(D2D1_SIZE_F size) {
     return l;
 }
 
+HistoryLayout LayoutHistory(D2D1_SIZE_F size) {
+    const float s = Scale(size), pad = 32.0f * s, right = size.width - pad, bottom = size.height - pad;
+    HistoryLayout l;
+    l.back = {right - 160.0f * s, bottom - 52.0f * s, right, bottom};
+    l.file = {l.back.left - 172.0f * s, l.back.top, l.back.left - 12.0f * s, bottom};
+    l.remove = {pad, l.back.top, pad + 160.0f * s, bottom};  // away from the others, so it isn't hit by mistake
+    l.list = {pad, pad + 64.0f * s, pad + (right - pad) * 0.34f, l.back.top - 24.0f * s};
+    l.detail = {l.list.right + 16.0f * s, l.list.top, right, l.list.bottom};
+    const float inset = 8.0f * s, rowHeight = 62.0f * s;
+    l.rowsShown = std::min(HistoryLayout::kMaxRows,
+                           static_cast<size_t>(std::max(0.0f, (l.list.bottom - l.list.top - 2 * inset) / rowHeight)));
+    for (size_t i = 0; i < l.rowsShown; ++i) {
+        const float top = l.list.top + inset + rowHeight * i;
+        l.rows[i] = {l.list.left + inset, top, l.list.right - inset, top + rowHeight - 4.0f * s};
+    }
+    return l;
+}
+
 RideLayout LayoutRide(D2D1_SIZE_F size, bool erg) {
-    const float s = Scale(size, true), pad = 24.0f * s, gap = 12.0f * s;
-    RideLayout l;
-    l.end = {size.width - pad - 140.0f * s, size.height - pad - 76.0f * s, size.width - pad, size.height - pad};
+    using L = RideLayout;
+    const float s = Scale(size, true), pad = 24.0f * s, gap = 12.0f * s, right = size.width - pad;
+    L l;
+    l.end = {right - 140.0f * s, size.height - pad - 76.0f * s, right, size.height - pad};
     l.pause = {l.end.left - gap - 140.0f * s, l.end.top, l.end.left - gap, l.end.bottom};
-    l.next = {pad, pad + 112.0f * s + gap, size.width - pad, std::round(size.height * 0.585f)};
+    const float cardWidth = (right - pad - gap * (L::kTop - 1)) / L::kTop;
+    for (int i = 0; i < L::kTop; ++i) {
+        const float x = pad + (cardWidth + gap) * i;
+        l.tiles[i] = {x, pad, x + cardWidth, pad + 112.0f * s};
+    }
+    // The graphs, with a column of cards on each side.
+    const float side = 200.0f * s, above = l.tiles[0].bottom + gap, below = l.end.top - gap;
+    const float split = std::round(above + (below - above) * 0.61f);
+    l.graphs[0] = {pad + side + gap, above, right - side - gap, split};
+    l.graphs[1] = {l.graphs[0].left, split + gap, l.graphs[0].right, below};
+    for (int row = 0; row < L::kSide; ++row) {
+        const D2D1_RECT_F g = l.graphs[row];
+        l.tiles[L::kTop + row] = {pad, g.top, pad + side, g.bottom};
+        l.tiles[L::kTop + L::kSide + row] = {right - side, g.top, right, g.bottom};
+    }
+    // The totals share one card left of the buttons.
+    l.footer = {pad, l.end.top, l.pause.left - gap, l.end.bottom};
+    const float statWidth = (l.footer.right - l.footer.left) / L::kBottom;
+    for (int i = 0; i < L::kBottom; ++i) {
+        const float x = l.footer.left + statWidth * i;
+        l.tiles[L::kTop + 2 * L::kSide + i] = {x, l.footer.top, x + statWidth, l.footer.bottom};
+    }
     if (!erg) return l;
-    l.target = {l.next.right - 260.0f * s, l.next.top, l.next.right, l.next.bottom};
-    l.next.right = l.target.left - gap;
+    D2D1_RECT_F& next = l.graphs[0];
+    l.target = {next.right - 260.0f * s, next.top, next.right, next.bottom};
+    next.right = l.target.left - gap;
     // Three digit columns, a little left of center to leave room for the unit.
     const float column = 64.0f * s, space = 8.0f * s, arrow = 44.0f * s, digits = 96.0f * s;
     const float left = (l.target.left + l.target.right) / 2 - 12.0f * s - (3 * column + 2 * space) / 2;
@@ -134,8 +192,44 @@ RideLayout LayoutRide(D2D1_SIZE_F size, bool erg) {
     return l;
 }
 
-ConfirmLayout LayoutConfirm(D2D1_SIZE_F size) {
-    const float s = Scale(size, true), w = 480.0f * s, h = 200.0f * s, in = 24.0f * s;
+int RideLayout::Hit(D2D1_POINT_2F p) const {
+    for (int i = 0; i < kSlots; ++i) {
+        const D2D1_RECT_F r = Slot(i);
+        if (p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom) return i;
+    }
+    return -1;
+}
+
+Board::Board() {
+    for (int i = 0; i < RideLayout::kSlots; ++i)
+        slots[i] = static_cast<uint8_t>(i < RideLayout::kTiles ? i : i - RideLayout::kTiles);
+}
+
+// One hex digit a slot. Each tile and each graph must show exactly once.
+Board Board::Parse(std::wstring_view text) {
+    Board b;
+    if (text.size() != RideLayout::kSlots) return {};
+    bool seen[RideLayout::kSlots]{};
+    for (int i = 0; i < RideLayout::kSlots; ++i) {
+        const wchar_t c = text[i];
+        const int v = c >= L'0' && c <= L'9' ? c - L'0' : c >= L'a' && c <= L'f' ? c - L'a' + 10 : -1;
+        const bool tile = i < RideLayout::kTiles;
+        const int count = tile ? RideLayout::kTiles : RideLayout::kGraphs, at = tile ? v : RideLayout::kTiles + v;
+        if (v < 0 || v >= count || seen[at]) return {};
+        seen[at] = true;
+        b.slots[i] = static_cast<uint8_t>(v);
+    }
+    return b;
+}
+
+std::wstring Board::Format() const {
+    std::wstring text;
+    for (uint8_t v : slots) text += L"0123456789abcdef"[v];
+    return text;
+}
+
+ConfirmLayout LayoutConfirm(D2D1_SIZE_F size, bool grow) {
+    const float s = Scale(size, grow), w = 480.0f * s, h = 200.0f * s, in = 24.0f * s;
     ConfirmLayout l;
     l.box = {(size.width - w) / 2, (size.height - h) / 2, (size.width + w) / 2, (size.height + h) / 2};
     const float mid = (l.box.left + l.box.right) / 2, top = l.box.bottom - in - 52.0f * s;
@@ -219,64 +313,101 @@ void Renderer::DrawHeader(ID2D1RenderTarget* target, std::wstring_view title, st
               DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 
-void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_view status, bool confirmEnd) {
-    const float s = Prepare(target, true), pad = 24.0f * s, gap = 12.0f * s;
+void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, const Board& board, std::wstring_view status,
+                    bool confirmEnd, const RideDrag* drag) {
+    using L = RideLayout;
+    const float s = Prepare(target, true);
     const D2D1_SIZE_F size = target->GetSize();
-
-    // Live numbers in cards, with heart rate when there is a monitor, and the gear in Sim mode.
     const bool erg = ride.mode() == Mode::Erg;
     const RideLayout layout = LayoutRide(size, erg);
-    wchar_t power[16], heart[16], cadence[16], speed[16], grade[16], gear[16];
-    swprintf_s(power, L"%d", ride.power());
-    if (ride.heartRate() > 0) swprintf_s(heart, L"%d", ride.heartRate());
-    else wcscpy_s(heart, L"–");
-    swprintf_s(cadence, L"%.0f", ride.cadence());
-    swprintf_s(speed, L"%.1f", ride.speed() * 3.6);
-    swprintf_s(grade, L"%.1f", ride.grade() * 100 + 0.0);  // + 0.0 turns -0.0 into 0.0
-    swprintf_s(gear, L"%d", ride.gear());
-    struct Metric {
-        std::wstring_view label, value, unit;
-        ID2D1Brush* brush;
+    const double length = ride.course().Length();
+
+    // A tile's live number. A dash stands for one there isn't, such as heart rate without a monitor or the gear in
+    // ERG mode. An endless course has no totals to ride towards.
+    wchar_t text[48];
+    const bool endless = ride.course().params.endless;
+    auto value = [&](Tile tile) -> const wchar_t* {
+        switch (tile) {
+        case Tile::Power: swprintf_s(text, L"%d", ride.power()); break;
+        case Tile::Cadence: swprintf_s(text, L"%.0f", ride.cadence()); break;
+        case Tile::Speed: swprintf_s(text, L"%.1f", ride.speed() * 3.6); break;
+        case Tile::Grade: swprintf_s(text, L"%.1f", ride.grade() * 100 + 0.0); break;  // + 0.0 turns -0.0 into 0.0
+        case Tile::Gear:
+            if (erg) return L"–";
+            swprintf_s(text, L"%d", ride.gear());
+            break;
+        case Tile::HeartRate:
+            if (ride.heartRate() <= 0) return L"–";
+            swprintf_s(text, L"%d", ride.heartRate());
+            break;
+        case Tile::AverageHeartRate:
+            if (ride.averageHeartRate() <= 0) return L"–";
+            swprintf_s(text, L"%d", ride.averageHeartRate());
+            break;
+        case Tile::MaxPower: swprintf_s(text, L"%d", ride.maxPower()); break;
+        case Tile::AverageCadence: swprintf_s(text, L"%d", ride.averageCadence()); break;
+        case Tile::Distance:
+            if (endless) swprintf_s(text, L"%.1f", ride.distance() / 1000);
+            else swprintf_s(text, L"%.1f / %.1f", ride.distance() / 1000, length / 1000);
+            break;
+        case Tile::Climbed:
+            if (endless) swprintf_s(text, L"%.0f", ride.climbed());
+            else swprintf_s(text, L"%.0f / %.0f", ride.climbed(), ride.course().targetGain);
+            break;
+        case Tile::AveragePower: swprintf_s(text, L"%d", ride.averagePower()); break;
+        case Tile::Calories: swprintf_s(text, L"%.0f", ride.calories()); break;
+        case Tile::Time: wcscpy_s(text, Clock(ride.elapsed()).c_str()); break;
+        }
+        return text;
     };
-    Metric metrics[6];
-    int count = 0;
-    metrics[count++] = {L"Power", power, L"W", accentText_.get()};
-    if (ride.heartRate() >= 0) metrics[count++] = {L"Heart rate", heart, L"bpm", text_.get()};
-    metrics[count++] = {L"Cadence", cadence, L"rpm", text_.get()};
-    metrics[count++] = {L"Speed", speed, L"km/h", text_.get()};
-    metrics[count++] = {L"Grade", grade, L"%", text_.get()};
-    if (!erg) metrics[count++] = {L"Gear", gear, L"", text_.get()};
-    const float cardWidth = (size.width - 2 * pad - gap * (count - 1)) / count;
-    const float metricsBottom = pad + 112.0f * s;
-    for (int i = 0; i < count; ++i) {
-        const float x = pad + (cardWidth + gap) * i;
-        const D2D1_RECT_F card{x, pad, x + cardWidth, metricsBottom};
-        DrawCard(target, card);
-        DrawStat(target, Inset(card, 18.0f * s, 14.0f * s), metrics[i].label, metrics[i].value, metrics[i].unit,
-                 50.0f * s, metrics[i].brush);
+
+    // Live numbers in cards along the top and the sides, and totals in one card along the bottom.
+    DrawCard(target, layout.footer);
+    for (int i = 0; i < L::kTiles; ++i) {
+        const Tile tile = board.tile(i);
+        const TileName& name = kTileNames[static_cast<size_t>(tile)];
+        ID2D1Brush* brush = tile == Tile::Power ? accentText_.get() : text_.get();
+        const D2D1_RECT_F r = layout.tiles[i];
+        if (i < L::kTop + 2 * L::kSide) {
+            DrawCard(target, r);
+            // A tall side card keeps its number with its label, as high as a top card, in the middle.
+            const float band = 84.0f * s, mid = (r.top + r.bottom) / 2;
+            const D2D1_RECT_F box = Inset(r, 18.0f * s, 14.0f * s);
+            DrawStat(target, i < L::kTop ? box : D2D1_RECT_F{box.left, std::max(box.top, mid - band / 2), box.right,
+                                                             std::min(box.bottom, mid + band / 2)},
+                     name.label, value(tile), name.unit, 50.0f * s, brush);
+            continue;
+        }
+        DrawStat(target, {r.left + 18.0f * s, r.top + 10.0f * s, r.right - 8.0f * s, r.bottom - 8.0f * s}, name.label,
+                 value(tile), name.unit, 26.0f * s, brush);
+        if (r.left > layout.footer.left)
+            target->DrawLine({r.left, r.top + 16.0f * s}, {r.left, r.bottom - 16.0f * s}, border_.get(), 1.0f);
     }
 
-    // The next 2 km in detail, starting a little behind the rider and colored by grade.
-    const float footerTop = size.height - pad - 76.0f * s;
-    const D2D1_RECT_F next = layout.next;
-    const D2D1_RECT_F whole{pad, next.bottom + gap, size.width - pad, footerTop - gap};
-    const double length = ride.course().Length();
-    const double from = std::clamp(ride.distance() - 250.0, 0.0, std::max(0.0, length - 2250.0));
-    DrawCard(target, next);
-    wchar_t caption[64];
-    DrawLabel(target, L"Next 2 km", label_.get(), {next.left + 18.0f * s, next.top + 10.0f * s, next.right, next.top + 34.0f * s},
-              muted_.get());
-    swprintf_s(caption, L"%.0f m", ride.elevation());
-    DrawLabel(target, caption, label_.get(), {next.left, next.top + 10.0f * s, next.right - 18.0f * s, next.top + 34.0f * s},
-              muted_.get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
-    DrawProfile(target, ride.course(), from, std::min(length, from + 2250.0), ride.distance(),
-                {next.left + 18.0f * s, next.top + 40.0f * s, next.right - 18.0f * s, next.bottom - 12.0f * s}, 30.0, true);
+    // The graphs: the next 2 km in detail, starting a little behind the rider and colored by grade, and the whole
+    // course.
+    for (int row = 0; row < L::kGraphs; ++row) {
+        const D2D1_RECT_F g = layout.graphs[row];
+        const D2D1_RECT_F caption{g.left + 18.0f * s, g.top + 10.0f * s, g.right - 18.0f * s, g.top + 34.0f * s};
+        const D2D1_RECT_F plot{g.left + 18.0f * s, g.top + 40.0f * s, g.right - 18.0f * s, g.bottom - 12.0f * s};
+        const Graph graph = board.graph(L::kTiles + row);
+        DrawCard(target, g);
+        DrawLabel(target, kGraphNames[static_cast<size_t>(graph)], label_.get(), caption, muted_.get());
+        if (graph == Graph::Next) {
+            const double from = std::clamp(ride.distance() - 250.0, 0.0, std::max(0.0, length - 2250.0));
+            swprintf_s(text, L"%.0f m", ride.elevation());
+            DrawLabel(target, text, label_.get(), caption, muted_.get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+            DrawProfile(target, ride.course(), from, std::min(length, from + 2250.0), ride.distance(), plot, 30.0, true);
+        } else {
+            DrawProfile(target, ride.course(), 0.0, length, ride.distance(), plot, 50.0, false);
+        }
+    }
 
-    // A message about the ride or the devices floats over the road ahead.
-    const D2D1_POINT_2F pill{(next.left + next.right) / 2, next.top + 22.0f * s};
+    // A message about the ride or the devices floats over the upper graph.
+    const D2D1_POINT_2F pill{(layout.graphs[0].left + layout.graphs[0].right) / 2, layout.graphs[0].top + 22.0f * s};
     if (!status.empty()) DrawPill(target, pill, status, warn_.get());
     else if (ride.finished()) DrawPill(target, pill, L"Finished", good_.get());
-    else if (ride.paused()) DrawPill(target, pill, L"Paused · Space or Z to go on", text_.get());
+    else if (ride.paused()) DrawPill(target, pill, L"Paused", text_.get());
 
     // The ERG target, a digit at a time, with leading zeros dimmed.
     if (erg) {
@@ -299,67 +430,60 @@ void Renderer::Draw(ID2D1RenderTarget* target, const Ride& ride, std::wstring_vi
                   muted_.get());
     }
 
-    // The whole course.
-    DrawCard(target, whole);
-    DrawLabel(target, L"Course", label_.get(), {whole.left + 18.0f * s, whole.top + 10.0f * s, whole.right, whole.top + 34.0f * s},
-              muted_.get());
-    DrawProfile(target, ride.course(), 0.0, length, ride.distance(),
-                {whole.left + 18.0f * s, whole.top + 40.0f * s, whole.right - 18.0f * s, whole.bottom - 12.0f * s}, 50.0,
-                false);
-
-    // Progress, climbing, power, calories and time along the bottom, and buttons to pause and end the ride.
-    wchar_t distance[48], climbed[48], avg[16], kcal[32];
-    // An endless course has no totals to ride towards.
-    if (ride.course().params.endless) {
-        swprintf_s(distance, L"%.1f", ride.distance() / 1000);
-        swprintf_s(climbed, L"%.0f", ride.climbed());
-    } else {
-        swprintf_s(distance, L"%.1f / %.1f", ride.distance() / 1000, length / 1000);
-        swprintf_s(climbed, L"%.0f / %.0f", ride.climbed(), ride.course().targetGain);
-    }
-    swprintf_s(avg, L"%d", ride.averagePower());
-    swprintf_s(kcal, L"%.0f", ride.calories());
-    const std::wstring time = Clock(ride.elapsed());
-    const D2D1_RECT_F footer{pad, footerTop, layout.pause.left - gap, size.height - pad};
-    DrawCard(target, footer);
     DrawButton(target, layout.pause, ride.paused() ? L"Resume" : L"Pause", Button::Secondary, button_.get());
     DrawButton(target, layout.end, L"End ride", Button::Secondary, button_.get());
-    const Metric totals[] = {{L"Distance", distance, L"km", text_.get()},
-                             {L"Climbed", climbed, L"m", text_.get()},
-                             {L"Average power", avg, L"W", text_.get()},
-                             {L"Calories", kcal, L"kcal", text_.get()},
-                             {L"Time", time, L"", text_.get()}};
-    const float statWidth = (footer.right - footer.left) / std::size(totals);
-    for (size_t i = 0; i < std::size(totals); ++i) {
-        const float x = footer.left + statWidth * i;
-        DrawStat(target, {x + 18.0f * s, footer.top + 10.0f * s, x + statWidth - 8.0f * s, footer.bottom - 8.0f * s},
-                 totals[i].label, totals[i].value, totals[i].unit, 26.0f * s, totals[i].brush);
-        if (i) target->DrawLine({x, footer.top + 16.0f * s}, {x, footer.bottom - 16.0f * s}, border_.get(), 1.0f);
+
+    // A dragged card dims in place and its name follows the mouse. The slots it can swap with are outlined, and
+    // the one under the mouse brighter.
+    if (drag && drag->lifted && !confirmEnd) {
+        const int over = layout.Hit(drag->at);
+        const float w = 2.0f * std::max(1.0f, s);
+        for (int i = 0; i < L::kSlots; ++i) {
+            if (!L::Swappable(i, drag->from)) continue;
+            const bool total = i >= L::kTop + 2 * L::kSide && i < L::kTiles;
+            const float radius = (total ? 8.0f : 12.0f) * s;
+            const D2D1_RECT_F slot = total ? Inset(layout.Slot(i), 4.0f * s, 6.0f * s) : layout.Slot(i);
+            if (i == drag->from) {
+                background_->SetOpacity(0.6f);
+                target->FillRoundedRectangle(D2D1::RoundedRect(slot, radius, radius), background_.get());
+                background_->SetOpacity(1.0f);
+            }
+            target->DrawRoundedRectangle(D2D1::RoundedRect(Inset(slot, w / 2, w / 2), radius, radius),
+                                         i == over ? accent_.get() : muted_.get(), i == over ? 1.5f * w : w);
+        }
+        const std::wstring_view name = drag->from < L::kTiles ? kTileNames[board.slots[drag->from]].label
+                                                              : kGraphNames[board.slots[drag->from]];
+        DrawPill(target, {drag->at.x, drag->at.y - 28.0f * s}, name, text_.get());
     }
 
     // Ending the ride asks first, over a dimmed screen.
-    if (confirmEnd) {
-        background_->SetOpacity(0.75f);
-        target->FillRectangle({0, 0, size.width, size.height}, background_.get());
-        background_->SetOpacity(1.0f);
-        const ConfirmLayout c = LayoutConfirm(size);
-        DrawCard(target, c.box);
-        const float in = 24.0f * s;
-        DrawLabel(target, L"End the ride?", heading_.get(), {c.box.left + in, c.box.top + 20.0f * s, c.box.right - in, c.box.top + 56.0f * s},
-                  text_.get());
-        DrawLabel(target, L"It's saved, and the summary comes next.", small_.get(),
-                  {c.box.left + in, c.box.top + 60.0f * s, c.box.right - in, c.box.top + 90.0f * s}, muted_.get());
-        DrawButton(target, c.no, L"No, keep riding", Button::Secondary, button_.get());
-        DrawButton(target, c.yes, L"Yes, end it", Button::Primary, button_.get());
-    }
+    if (confirmEnd)
+        DrawConfirm(target, LayoutConfirm(size), L"End the ride?", L"It's saved, and the summary comes next.",
+                    L"No, keep riding", L"Yes, end it");
+}
+
+// A question over the dimmed screen.
+void Renderer::DrawConfirm(ID2D1RenderTarget* target, const ConfirmLayout& c, std::wstring_view title,
+                           std::wstring_view text, std::wstring_view no, std::wstring_view yes) {
+    const float s = scale_, in = 24.0f * s;
+    const D2D1_SIZE_F size = target->GetSize();
+    background_->SetOpacity(0.75f);
+    target->FillRectangle({0, 0, size.width, size.height}, background_.get());
+    background_->SetOpacity(1.0f);
+    DrawCard(target, c.box);
+    DrawLabel(target, title, heading_.get(), {c.box.left + in, c.box.top + 20.0f * s, c.box.right - in, c.box.top + 56.0f * s},
+              text_.get());
+    DrawLabel(target, text, small_.get(), {c.box.left + in, c.box.top + 60.0f * s, c.box.right - in, c.box.top + 90.0f * s},
+              muted_.get());
+    DrawButton(target, c.no, no, Button::Secondary, button_.get());
+    DrawButton(target, c.yes, yes, Button::Primary, button_.get());
 }
 
 void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
     const float s = Prepare(target);
     const SetupLayout l = LayoutSetup(target->GetSize(), view.rows.size());
     const bool endless = view.course && view.course->params.endless;
-    DrawHeader(target, kAppName, endless ? L"↑↓ choose · ←→ change · D devices · Enter start · F11 full screen"
-                                         : L"↑↓ choose · ←→ change · R new course · D devices · Enter start · F11 full screen");
+    DrawHeader(target, kAppName, L"");
 
     // Settings on the left. The selected one is highlighted, with arrows to change it.
     DrawCard(target, l.panel);
@@ -406,6 +530,40 @@ void Renderer::DrawSetup(ID2D1RenderTarget* target, const SetupView& view) {
                     endless ? 700.0 : 50.0, false);  // terrains on one scale, so mountains look bigger than rollers
     }
 
+    // Past rides under the settings, newest first, as many as fit.
+    const D2D1_RECT_F h = l.history;
+    const float rowHeight = 30.0f * s, captionHeight = 40.0f * s;
+    if (h.bottom - h.top >= captionHeight + rowHeight) {
+        DrawCard(target, h);
+        DrawLabel(target, L"History", label_.get(), {h.left + 20.0f * s, h.top + 8.0f * s, h.right, h.top + 32.0f * s},
+                  muted_.get());
+        DrawLabel(target, L"H see all ›", label_.get(), {h.left, h.top + 8.0f * s, h.right - 20.0f * s, h.top + 32.0f * s},
+                  faint_.get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+        const float left = h.left + 20.0f * s, right = h.right - 20.0f * s;
+        if (view.history.empty())
+            DrawLabel(target, L"No rides yet", small_.get(),
+                      {left, h.top + captionHeight, right, h.top + captionHeight + rowHeight}, faint_.get());
+        // The date, then distance, climb, time and average power in columns.
+        const float column = (right - left) * 0.16f;
+        const auto rows = static_cast<size_t>((h.bottom - h.top - captionHeight - 8.0f * s) / rowHeight);
+        for (size_t i = 0; i < std::min(rows, view.history.size()); ++i) {
+            const PastRide& ride = view.history[i];
+            const LogTotals& t = ride.totals;
+            const float top = h.top + captionHeight + rowHeight * i;
+            if (i) target->DrawLine({left, top}, {right, top}, border_.get(), 1.0f);
+            DrawLabel(target, ride.date, small_.get(), {left, top, right - 4 * column, top + rowHeight}, text_.get());
+            wchar_t cells[4][24];
+            swprintf_s(cells[0], L"%.1f km", t.distance / 1000);
+            swprintf_s(cells[1], L"%.0f m", t.climbed);
+            wcscpy_s(cells[2], Clock(t.seconds).c_str());
+            swprintf_s(cells[3], L"%d W", t.averagePower);
+            for (int c = 0; c < 4; ++c)
+                DrawLabel(target, cells[c], small_.get(),
+                          {right - (4 - c) * column, top, right - (3 - c) * column, top + rowHeight}, muted_.get(),
+                          DWRITE_TEXT_ALIGNMENT_TRAILING);
+        }
+    }
+
     // Devices at the bottom left, one line each, buttons at the bottom right.
     const float lineHeight = 22.0f * s, pad = 32.0f * s;
     const size_t lines = view.devices.size();
@@ -429,7 +587,7 @@ void Renderer::DrawDevices(ID2D1RenderTarget* target, const DevicesView& view) {
     const float s = Prepare(target), pad = 32.0f * s, inset = 20.0f * s;
     const D2D1_SIZE_F size = target->GetSize();
     const DevicesLayout l = LayoutDevices(size, view.nearby.size());
-    DrawHeader(target, L"Devices", L"↑↓ choose · Enter connect or disconnect · Esc continue · F11 full screen");
+    DrawHeader(target, L"Devices", L"");
 
     // Bluetooth itself, with a button to fix it when it's off.
     const bool off = !view.action.empty();
@@ -540,6 +698,196 @@ void Renderer::DrawSummary(ID2D1RenderTarget* target, const SummaryView& view) {
     DrawButton(target, l.done, L"Done", Button::Primary, button_.get());
 }
 
+void Renderer::DrawHistory(ID2D1RenderTarget* target, const HistoryView& view) {
+    const float s = Prepare(target), inset = 14.0f * s, radius = 8.0f * s;
+    const D2D1_SIZE_F size = target->GetSize();
+    const HistoryLayout l = LayoutHistory(size);
+    DrawHeader(target, L"History", L"");
+    const bool any = !view.rides.empty();
+
+    // The rides on the left, newest first, with a bar along the side when they don't all fit.
+    DrawCard(target, l.list);
+    if (!any && l.rowsShown)
+        DrawLabel(target, L"No rides yet", row_.get(), Inset(l.rows[0], inset, 0), muted_.get());
+    for (size_t row = 0; row < l.rowsShown && view.first + row < view.rides.size(); ++row) {
+        const size_t i = view.first + row;
+        const PastRide& ride = view.rides[i];
+        const D2D1_RECT_F r = l.rows[row];
+        const bool selected = i == view.selected;
+        if (selected) {
+            target->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), raised_.get());
+            target->FillRoundedRectangle(
+                D2D1::RoundedRect({r.left, r.top + 12.0f * s, r.left + 3.0f * s, r.bottom - 12.0f * s}, 1.5f * s, 1.5f * s),
+                accent_.get());
+        }
+        const float mid = (r.top + r.bottom) / 2;
+        DrawLabel(target, ride.date, row_.get(), {r.left + inset, r.top + 4.0f * s, r.right - inset, mid + 2.0f * s},
+                  selected ? text_.get() : muted_.get());
+        wchar_t line[64];
+        swprintf_s(line, L"%.1f km · %s · %d W", ride.totals.distance / 1000, Clock(ride.totals.seconds).c_str(),
+                   ride.totals.averagePower);
+        DrawLabel(target, line, small_.get(), {r.left + inset, mid, r.right - inset, r.bottom - 6.0f * s}, faint_.get());
+    }
+    if (view.rides.size() > l.rowsShown && l.rowsShown) {
+        const float top = l.rows[0].top, height = l.rows[l.rowsShown - 1].bottom - top, x = l.list.right - 5.0f * s;
+        const float n = static_cast<float>(view.rides.size());
+        const float a = top + height * view.first / n, b = top + height * (view.first + l.rowsShown) / n;
+        target->FillRoundedRectangle(D2D1::RoundedRect({x - 1.5f * s, a, x + 1.5f * s, std::min(b, top + height)}, 1.5f * s,
+                                                       1.5f * s),
+                                     border_.get());
+    }
+
+    // The selected ride: where it went, its numbers, and its power and elevation from start to end.
+    if (any) {
+        const PastRide& ride = view.rides[view.selected];
+        const LogTotals& t = ride.totals;
+        const D2D1_RECT_F d = l.detail;
+        DrawCard(target, d);
+        const float left = d.left + 24.0f * s, right = d.right - 24.0f * s;
+        DrawLabel(target, ride.date, heading_.get(), {left, d.top + 16.0f * s, right, d.top + 50.0f * s}, text_.get());
+        DrawLabel(target, ride.course, small_.get(), {left, d.top + 50.0f * s, right, d.top + 74.0f * s}, muted_.get());
+
+        wchar_t distance[16], climbed[16], speed[16], kcal[16], avg[16], max[16], cadence[16], heart[16], peak[16];
+        swprintf_s(distance, L"%.1f", t.distance / 1000);
+        swprintf_s(climbed, L"%.0f", t.climbed);
+        swprintf_s(speed, L"%.1f", t.seconds ? t.distance / t.seconds * 3.6 : 0.0);
+        swprintf_s(kcal, L"%.0f", t.calories);
+        swprintf_s(avg, L"%d", t.averagePower);
+        swprintf_s(max, L"%d", t.maxPower);
+        // A dash for what wasn't measured, such as heart rate without a monitor.
+        auto optional = [](wchar_t (&buf)[16], int v) { v > 0 ? swprintf_s(buf, L"%d", v) : wcscpy_s(buf, L"–"); };
+        optional(cadence, t.averageCadence);
+        optional(heart, t.averageHeartRate);
+        optional(peak, t.maxHeartRate);
+        const std::wstring time = Clock(t.seconds);
+        struct Stat {
+            std::wstring_view label, value, unit;
+        } const stats[] = {{L"Time", time, L""},           {L"Distance", distance, L"km"},
+                           {L"Climbed", climbed, L"m"},     {L"Average speed", speed, L"km/h"},
+                           {L"Calories", kcal, L"kcal"},    {L"Average power", avg, L"W"},
+                           {L"Max power", max, L"W"},       {L"Average cadence", cadence, L"rpm"},
+                           {L"Average heart rate", heart, L"bpm"}, {L"Max heart rate", peak, L"bpm"}};
+        constexpr size_t kColumns = 5;
+        const float top = d.top + 86.0f * s, cellWidth = (right - left) / kColumns, cellHeight = 64.0f * s;
+        for (size_t i = 0; i < std::size(stats); ++i) {
+            const float x = left + cellWidth * (i % kColumns), y = top + cellHeight * (i / kColumns);
+            DrawStat(target, {x, y, x + cellWidth - 12.0f * s, y + cellHeight - 6.0f * s}, stats[i].label, stats[i].value,
+                     stats[i].unit, 28.0f * s, i == 5 ? accentText_.get() : text_.get());
+        }
+
+        // The route, lit as far as it was ridden. Of an endless one, only the part ridden.
+        const float routeTop = top + 2 * cellHeight + 12.0f * s;
+        const float graphTop = routeTop + std::round((d.bottom - routeTop) / 2);
+        target->DrawLine({left, routeTop - 6.0f * s}, {right, routeTop - 6.0f * s}, border_.get(), 1.0f);
+        if (view.route) {
+            const Course& route = *view.route;
+            const double ridden = std::min(t.distance, route.Length());
+            const bool endless = route.params.endless;
+            const double shown = endless ? std::clamp(ridden, 1000.0, route.Length()) : route.Length();
+            wchar_t caption[64];
+            if (endless || ridden >= route.Length() - kCourseStep) swprintf_s(caption, L"%.1f km", ridden / 1000);
+            else swprintf_s(caption, L"%.1f of %.1f km", ridden / 1000, route.Length() / 1000);
+            DrawLabel(target, L"Route", label_.get(), {left, routeTop, right, routeTop + 24.0f * s}, muted_.get());
+            DrawLabel(target, caption, label_.get(), {left, routeTop, right, routeTop + 24.0f * s}, muted_.get(),
+                      DWRITE_TEXT_ALIGNMENT_TRAILING);
+            DrawProfile(target, route, 0.0, shown, ridden, {left, routeTop + 30.0f * s, right, graphTop - 18.0f * s}, 50.0,
+                        false);
+        }
+
+        target->DrawLine({left, graphTop - 6.0f * s}, {right, graphTop - 6.0f * s}, border_.get(), 1.0f);
+        DrawLabel(target, L"Power", label_.get(), {left, graphTop, right, graphTop + 24.0f * s}, accentText_.get());
+        DrawLabel(target, L"Elevation", label_.get(), {left, graphTop, right, graphTop + 24.0f * s}, muted_.get(),
+                  DWRITE_TEXT_ALIGNMENT_TRAILING);
+        DrawRideGraph(target, view.samples, {left, graphTop + 30.0f * s, right, d.bottom - 14.0f * s});
+    }
+
+    DrawButton(target, l.remove, L"Delete", Button::Secondary, button_.get(), any);
+    DrawButton(target, l.file, L"Show file", Button::Secondary, button_.get(), any);
+    DrawButton(target, l.back, L"Back", Button::Primary, button_.get());
+
+    if (view.confirmDelete)
+        DrawConfirm(target, LayoutConfirm(size, false), L"Delete this ride?",
+                    L"Its log and FIT file go to the Recycle Bin.", L"No, keep it", L"Yes, delete");
+}
+
+// A ride's power as a line over its elevation as a shape, from start to end. Power runs up the left and the time
+// along the bottom. Each column averages its stretch of seconds, so the line shows efforts rather than noise.
+void Renderer::DrawRideGraph(ID2D1RenderTarget* target, std::span<const LogSample> samples, D2D1_RECT_F box) {
+    const D2D1_RECT_F frame = box;
+    box = {box.left + 52.0f * scale_, box.top, box.right, box.bottom - 22.0f * scale_};
+    const float width = box.right - box.left, height = box.bottom - box.top;
+    if (samples.size() < 2 || width < 2 || height < 2) return;
+    const size_t columns = std::clamp<size_t>(static_cast<size_t>(width / 3.0f), 2, samples.size());
+    const float dx = width / (columns - 1);
+    std::vector<float> power(columns);
+    heights_.resize(columns);
+    float top = 0, lo = 1e9f, hi = -1e9f;
+    for (size_t c = 0; c < columns; ++c) {
+        const size_t a = samples.size() * c / columns, b = samples.size() * (c + 1) / columns;
+        double sum = 0;
+        for (size_t i = a; i < b; ++i) sum += samples[i].power;
+        power[c] = static_cast<float>(sum / (b - a));
+        heights_[c] = static_cast<float>(samples[(a + b) / 2].elevation);
+        top = std::max(top, power[c]);
+        lo = std::min(lo, heights_[c]);
+        hi = std::max(hi, heights_[c]);
+    }
+    // Power fills the height. The elevation keeps to the lower half, and flat roads stay flat.
+    const double watts = std::max(100.0, top * 1.1);
+    const float span = std::max(hi - lo, 30.0f);
+    auto yPower = [&](double w) { return height - static_cast<float>(w / watts) * height; };
+    auto yElevation = [&](float e) { return height - (e - lo) / span * height * 0.5f; };
+
+    wchar_t tick[24];
+    const double step = NiceStep(watts / 4);
+    for (double w = 0; w <= watts; w += step) {
+        const float at = box.top + yPower(w);
+        target->DrawLine({box.left, at}, {box.right, at}, border_.get(), 1.0f);
+        swprintf_s(tick, L"%.0f W", w);
+        DrawLabel(target, tick, label_.get(), {frame.left, at - 10.0f * scale_, box.left - 8.0f * scale_, at + 10.0f * scale_},
+                  faint_.get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+    // Ticks every round number of minutes.
+    const double seconds = static_cast<double>(samples.size());
+    double stride = 60;
+    for (const double m : {1, 2, 5, 10, 15, 20, 30, 60, 120, 240})
+        if (stride = m * 60; seconds / stride <= width / (110.0f * scale_)) break;
+    for (double t = 0; t <= seconds; t += stride) {
+        const float at = box.left + static_cast<float>(t / seconds) * width;
+        target->DrawLine({at, box.bottom}, {at, box.bottom + 4.0f * scale_}, faint_.get(), 1.0f);
+        const int m = static_cast<int>(t / 60);
+        swprintf_s(tick, L"%d:%02d", m / 60, m % 60);
+        const bool last = at > box.right - 24.0f * scale_;
+        DrawLabel(target, tick, label_.get(),
+                  {at - 100.0f * scale_, box.bottom + 4.0f * scale_, at + (last ? 6.0f : 100.0f) * scale_, frame.bottom},
+                  faint_.get(), last ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+
+    // A shape through the columns' points, filled down to the bottom when closed.
+    auto shape = [&](auto y, bool closed) {
+        winrt::com_ptr<ID2D1PathGeometry> path;
+        winrt::com_ptr<ID2D1GeometrySink> sink;
+        winrt::check_hresult(factory_->CreatePathGeometry(path.put()));
+        winrt::check_hresult(path->Open(sink.put()));
+        sink->BeginFigure(closed ? D2D1_POINT_2F{0, height} : D2D1_POINT_2F{0, y(0)},
+                          closed ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW);
+        for (size_t i = closed ? 0 : 1; i < columns; ++i) sink->AddLine({dx * i, y(i)});
+        if (closed) sink->AddLine({width, height});
+        sink->EndFigure(closed ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
+        winrt::check_hresult(sink->Close());
+        return path;
+    };
+    D2D1_MATRIX_3X2_F saved;
+    target->GetTransform(&saved);
+    target->SetTransform(D2D1::Matrix3x2F::Translation(box.left, box.top) * saved);
+    const float s = std::max(1.0f, scale_);
+    trackFill_->SetStartPoint({0, height / 2});
+    trackFill_->SetEndPoint({0, height});
+    target->FillGeometry(shape([&](size_t i) { return yElevation(heights_[i]); }, true).get(), trackFill_.get());
+    target->DrawGeometry(shape([&](size_t i) { return yPower(power[i]); }, false).get(), accentText_.get(), 1.5f * s);
+    target->SetTransform(saved);
+}
+
 void Renderer::DrawCard(ID2D1RenderTarget* target, D2D1_RECT_F box, bool focused) {
     const float radius = 12.0f * scale_;
     const D2D1_ROUNDED_RECT r = D2D1::RoundedRect(box, radius, radius);
@@ -565,13 +913,23 @@ void Renderer::DrawStat(ID2D1RenderTarget* target, D2D1_RECT_F box, std::wstring
                                          layout.put())))
         return;
     layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    layout->SetFontSize(valueSize, {0, length});
     if (tabular_) layout->SetTypography(tabular_.get(), {0, valueLength});
+    auto size = [&](float v) {
+        layout->SetFontSize(v, {0, valueLength});
+        if (valueLength < length) layout->SetFontSize(std::max(14.0f * s, v * 0.4f), {valueLength, length - valueLength});
+    };
+    size(valueSize);
     if (valueLength < length) {
-        layout->SetFontSize(std::max(14.0f * s, valueSize * 0.4f), {valueLength, length - valueLength});
         layout->SetFontWeight(DWRITE_FONT_WEIGHT_NORMAL, {valueLength, length - valueLength});
         layout->SetDrawingEffect(muted_.get(), {valueLength, length - valueLength});
     }
+    // A long value, such as the distance in a narrow card, shrinks to fit rather than being cut short.
+    const DWRITE_TRIMMING none{DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0};
+    layout->SetTrimming(&none, nullptr);
+    DWRITE_TEXT_METRICS m{};
+    const float room = box.right - box.left;
+    if (SUCCEEDED(layout->GetMetrics(&m)) && m.widthIncludingTrailingWhitespace > room)
+        size(valueSize * room / m.widthIncludingTrailingWhitespace * 0.97f);
     target->DrawTextLayout({box.left, box.top + 20.0f * s}, layout.get(), valueBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 

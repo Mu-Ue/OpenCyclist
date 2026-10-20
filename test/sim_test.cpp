@@ -121,6 +121,35 @@ int main() {
                        RideToFit("time_s\n").empty();
     if (!fitOk) ++failures, std::printf("FAIL fit\n");
 
+    // The same log's totals for the list of past rides.
+    CourseParams logged;
+    std::vector<LogSample> rows;
+    const bool read = ReadLog(std::string(log) + "2,10.0,100.5,0.0,1000,91,18.0,erg,10,200,141\n", logged, rows);
+    const LogTotals sum = SumLog(rows);
+    if (!read || logged.km != 1.0 || logged.maxGradePct != 10 || logged.loop || logged.seed != 1 || sum.seconds != 2 ||
+        sum.distance != 10.0 || std::abs(sum.climbed - 0.5) > 1e-9 || sum.averagePower != 1002 || sum.maxPower != 1004 ||
+        sum.averageCadence != 91 || sum.averageHeartRate != 141 || sum.maxHeartRate != 141 ||
+        ReadLog("time_s\n", logged, rows))
+        ++failures, std::printf("FAIL log totals\n");
+
+    // A logged ride's course is made again from its settings, unless its heights say it was another road.
+    for (const bool endless : {false, true}) {
+        const CourseParams p{.km = 5, .gainM = 100, .seed = 7, .endless = endless, .terrain = 2};
+        Course course = GenerateCourse(p);
+        const double ridden = endless ? 30000 : 3000;
+        while (endless && course.Length() - ridden < kEndlessAheadM) course.Extend();
+        std::vector<LogSample> exact, other;
+        for (double d = 0; d <= ridden; d += 8) {
+            const double e = std::round(course.ElevationAt(d) * 10) / 10;
+            exact.push_back({d, e, 0, 0, 0, 0});
+            other.push_back({d, e + 20 * std::sin(d / 300), 0, 0, 0, 0});
+        }
+        const Course same = LoggedCourse(p, exact), traced = LoggedCourse(p, other);
+        if (same.Length() != course.Length() || same.params.endless != endless || !traced.params.endless ||
+            std::abs(traced.Length() - ridden) > 20 || std::abs(traced.ElevationAt(1000) - other[125].elevation) > 0.5)
+            ++failures, std::printf("FAIL logged course, endless %d\n", endless);
+    }
+
     std::printf("%d courses, 250 W: %.1f km/h flat, %.1f km/h at 8%%, 30 km and %.0f m up in %d:%02d. %s\n", courses,
                 flat, climb, ride.climbed(), int(hours), int(hours * 60) % 60, failures ? "FAILED" : "OK");
     return failures ? 1 : 0;

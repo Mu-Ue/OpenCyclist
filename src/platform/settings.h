@@ -18,6 +18,7 @@ struct Settings {
     double riderKg = 75.0;
     int ergW = 150;
     SavedDevice devices[3];  // trainer, shifters and heart rate monitor, in ble::Role order
+    std::wstring board;      // how the ride screen's cards and graphs are arranged, as Board::Format writes it
     std::wstring snapshot;  // --snapshot: render a ride to this PNG and quit. Not saved.
 };
 

@@ -13,6 +13,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <winrt/base.h>
@@ -34,6 +35,23 @@ constexpr UINT_PTR kRepeatTimer = 2;
 constexpr UINT kRepeatDelayMs = 400, kRepeatMs = 60;  // a held setting starts stepping after the delay
 constexpr ULONGLONG kContinueMs = 3000;  // the devices screen shows all connected this long before moving on
 constexpr int kCards = static_cast<int>(ble::kRoleCount);  // the devices screen's first items, one per role
+constexpr size_t kMaxHistory = 20;  // past rides read for the setup screen, more than fit on a tall screen
+constexpr const wchar_t* kTerrainShort[kTerrainCount] = {L"Flat", L"Rolling", L"Hilly", L"Mountains"};
+
+// A course's route and settings in a few words, such as "Loop · 30 km · 500 m up · max 10 %".
+std::wstring CourseText(const CourseParams& c) {
+    wchar_t buf[96];
+    if (c.endless) swprintf_s(buf, L"Infinite · %s", kTerrainShort[std::clamp(c.terrain, 0, kTerrainCount - 1)]);
+    else swprintf_s(buf, L"%s · %g km · %.0f m up · max %g %%", c.loop ? L"Loop" : L"Point to point", c.km, c.gainM,
+                    c.maxGradePct);
+    return buf;
+}
+
+// Shows a file in File Explorer, selected, ready to drag into an upload page.
+void Reveal(HWND hwnd, const std::wstring& path) {
+    const std::wstring args = L"/select,\"" + path + L"\"";
+    ShellExecuteW(hwnd, nullptr, L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+}
 
 std::wstring_view RoleName(ble::Role role) {
     switch (role) {
@@ -59,7 +77,7 @@ double StepValue(double v, int dir, double step, double lo, double hi) {
 
 class App {
 public:
-    explicit App(Settings settings) : settings_(std::move(settings)) {}
+    explicit App(Settings settings) : settings_(std::move(settings)), board_(Board::Parse(settings_.board)) {}
     int Run(HINSTANCE instance);
 
 private:
@@ -75,6 +93,19 @@ private:
     void Summarize();
     void Reroll();
     void KeepRideSettings();
+    void LoadHistory(bool all);
+
+    // The history screen.
+    void ShowHistory();
+    void CloseHistory();
+    void Pick(int index);
+    void LoadSamples();
+    std::wstring RidePath(const PastRide& ride, const wchar_t* extension) const;
+    void ShowRideFile() const;
+    void AskToDelete();
+    void DeleteRide();
+    void OnHistoryKey(WPARAM key);
+    void OnHistoryClick(D2D1_POINT_2F p);
     void Start();
     void NewRide();
     void AskToEnd();
@@ -106,6 +137,8 @@ private:
 
     void OnKey(WPARAM key);
     void OnClick(D2D1_POINT_2F p);
+    void OnDrag(D2D1_POINT_2F p);
+    void Drop(D2D1_POINT_2F p);
     void OnWheel(D2D1_POINT_2F p, int dir);
     void OnButtons(uint32_t pressed);
     bool Held(uint32_t button, ULONGLONG now);
@@ -125,6 +158,8 @@ private:
     void Shutdown();
 
     Settings settings_;
+    Board board_;     // the ride screen's arrangement
+    RideDrag drag_;   // a card or graph held on the ride screen
     HWND hwnd_ = nullptr;
     winrt::com_ptr<ID2D1Factory> d2d_;
     winrt::com_ptr<IDWriteFactory> dwrite_;
@@ -138,6 +173,15 @@ private:
 
     Course course_;  // on the setup screen, and the one being ridden
     std::wstring stats_[1];  // the course's rough time
+    std::vector<PastRide> history_;  // the newest rides, or all of them once the history screen has opened
+    bool historyAll_ = false;
+
+    bool historyOpen_ = false;  // the history screen shows instead of the setup screen
+    int pick_ = 0, pickTop_ = 0;  // the selected ride, and the one in the list's top row
+    bool confirmDelete_ = false;
+    std::vector<LogSample> samples_;  // the selected ride's, for its graph
+    std::wstring samplesOf_;          // the log they are from
+    Course route_;                    // the course it was ridden on, empty without samples
     int selected_ = 0;
     std::unique_ptr<Ride> ride_;  // null on the setup and devices screens
     bool confirmEnd_ = false;  // asking whether to end the ride
@@ -212,6 +256,7 @@ int App::Run(HINSTANCE instance) {
 
     if (!settings_.course.seed) settings_.course.seed = RandomSeed();
     MakeCourse();
+    LoadHistory(false);
     // Start on the devices screen. Remembered devices connect by themselves, and once they all have, the
     // course screen follows. The window shows first, so Bluetooth starting up doesn't hold up the first frame.
     devices_ = true;
@@ -307,12 +352,17 @@ LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
         OnClick(ToDips({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}));
         UpdateTimer();
         return 0;
+    case WM_MOUSEMOVE:
+        if (drag_.from >= 0) OnDrag(ToDips({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}));
+        return 0;
     case WM_LBUTTONUP:
+        if (drag_.from >= 0) Drop(ToDips({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}));
         if (GetCapture() == hwnd_) ReleaseCapture();
         StopRepeat();
         return 0;
     case WM_CAPTURECHANGED:
         StopRepeat();
+        if (drag_.from >= 0) drag_ = {}, Redraw();  // lost to another window
         return 0;
     case WM_MOUSEWHEEL: {
         POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -509,6 +559,7 @@ void App::AskToEnd() {
 void App::EndRide() {
     CloseLog();
     SaveFit();
+    LoadHistory(false);
     KeepRideSettings();
     SaveSettings(settings_);
     confirmEnd_ = false;
@@ -534,6 +585,163 @@ void App::CloseSummary() {
     Redraw();
 }
 
+// The ride logs with rows, newest first: a few for the setup screen, or all for the history screen. A log is named
+// by its local start time. Rides already read are kept rather than read again.
+void App::LoadHistory(bool all) {
+    historyAll_ = historyAll_ || all;
+    const std::wstring dir = RidesDir();
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW found;
+    const HANDLE find = FindFirstFileW((dir + L"\\*.csv").c_str(), &found);
+    if (find != INVALID_HANDLE_VALUE) {
+        do names.push_back(found.cFileName);
+        while (FindNextFileW(find, &found));
+        FindClose(find);
+    }
+    std::sort(names.rbegin(), names.rend());
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    std::vector<PastRide> rides;
+    CourseParams course;
+    std::vector<LogSample> samples;
+    for (const std::wstring& name : names) {
+        if (!historyAll_ && rides.size() == kMaxHistory) break;
+        if (auto known = std::find_if(history_.begin(), history_.end(), [&](const PastRide& r) { return r.name == name; });
+            known != history_.end()) {
+            rides.push_back(std::move(*known));
+            continue;
+        }
+        SYSTEMTIME st{};
+        if (swscanf_s(name.c_str(), L"%4hu-%2hu-%2hu_%2hu%2hu%2hu", &st.wYear, &st.wMonth, &st.wDay, &st.wHour,
+                      &st.wMinute, &st.wSecond) != 6)
+            continue;
+        std::ifstream in(dir + L"\\" + name, std::ios::binary);
+        if (!ReadLog(std::string(std::istreambuf_iterator<char>(in), {}), course, samples) || samples.empty()) continue;
+        // The year only for rides from another year.
+        wchar_t date[64] = L"", time[32] = L"";
+        GetDateFormatEx(L"en-US", 0, &st, st.wYear == now.wYear ? L"ddd d MMM" : L"ddd d MMM yyyy", date,
+                        static_cast<int>(std::size(date)), nullptr);
+        GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, nullptr, time, static_cast<int>(std::size(time)));
+        rides.push_back({name, std::wstring(date) + L" · " + time, CourseText(course), SumLog(samples)});
+    }
+    history_ = std::move(rides);
+}
+
+void App::ShowHistory() {
+    LoadHistory(true);
+    historyOpen_ = true;
+    confirmDelete_ = false;
+    pickTop_ = 0;
+    Pick(0);
+}
+
+void App::CloseHistory() {
+    historyOpen_ = false;
+    confirmDelete_ = false;
+    samples_.clear();
+    samplesOf_.clear();
+    route_ = {};
+    Redraw();
+}
+
+// Selects a ride, scrolling the list to keep it in view.
+void App::Pick(int index) {
+    pick_ = std::clamp(index, 0, std::max(0, static_cast<int>(history_.size()) - 1));
+    const int shown = std::max(1, static_cast<int>(LayoutHistory(Size()).rowsShown));
+    pickTop_ = std::clamp(pickTop_, pick_ - shown + 1, pick_);
+    LoadSamples();
+    Redraw();
+}
+
+// The selected ride's rows, read when the selection moves to another ride.
+void App::LoadSamples() {
+    if (history_.empty()) {
+        samples_.clear();
+        samplesOf_.clear();
+        route_ = {};
+        return;
+    }
+    const PastRide& ride = history_[pick_];
+    if (ride.name == samplesOf_) return;
+    samplesOf_ = ride.name;
+    std::ifstream in(RidePath(ride, L".csv"), std::ios::binary);
+    CourseParams course;
+    if (!ReadLog(std::string(std::istreambuf_iterator<char>(in), {}), course, samples_)) samples_.clear();
+    route_ = samples_.empty() ? Course{} : LoggedCourse(course, samples_);
+}
+
+// The ride's log, or its FIT file next to it.
+std::wstring App::RidePath(const PastRide& ride, const wchar_t* extension) const {
+    return RidesDir() + L"\\" + ride.name.substr(0, ride.name.rfind(L'.')) + extension;
+}
+
+// The FIT file to upload, or the log when there is none.
+void App::ShowRideFile() const {
+    if (history_.empty()) return;
+    const std::wstring fit = RidePath(history_[pick_], L".fit");
+    Reveal(hwnd_, GetFileAttributesW(fit.c_str()) != INVALID_FILE_ATTRIBUTES ? fit : RidePath(history_[pick_], L".csv"));
+}
+
+void App::AskToDelete() {
+    if (history_.empty()) return;
+    confirmDelete_ = true;
+    Redraw();
+}
+
+// Moves the ride's log and FIT file to the Recycle Bin, so a slip can be undone there.
+void App::DeleteRide() {
+    confirmDelete_ = false;
+    if (history_.empty()) return Redraw();
+    const PastRide& ride = history_[pick_];
+    std::wstring files = RidePath(ride, L".csv") + L'\0';
+    if (const std::wstring fit = RidePath(ride, L".fit"); GetFileAttributesW(fit.c_str()) != INVALID_FILE_ATTRIBUTES)
+        files += fit + L'\0';
+    files += L'\0';  // the list ends with an empty name
+    SHFILEOPSTRUCTW op{};
+    op.hwnd = hwnd_;
+    op.wFunc = FO_DELETE;
+    op.pFrom = files.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    if (SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted) history_.erase(history_.begin() + pick_);
+    Pick(pick_);
+}
+
+void App::OnHistoryKey(WPARAM key) {
+    if (confirmDelete_) {
+        if (key == VK_RETURN || key == 'Y') DeleteRide();
+        else if (key == VK_ESCAPE || key == 'N') confirmDelete_ = false, Redraw();
+        return;
+    }
+    const int page = std::max(1, static_cast<int>(LayoutHistory(Size()).rowsShown));
+    switch (key) {
+    case VK_UP: Pick(pick_ - 1); break;
+    case VK_DOWN: Pick(pick_ + 1); break;
+    case VK_PRIOR: Pick(pick_ - page); break;
+    case VK_NEXT: Pick(pick_ + page); break;
+    case VK_HOME: Pick(0); break;
+    case VK_END: Pick(static_cast<int>(history_.size()) - 1); break;
+    case VK_DELETE: AskToDelete(); break;
+    case VK_ESCAPE:
+    case VK_BACK: CloseHistory(); break;
+    }
+}
+
+void App::OnHistoryClick(D2D1_POINT_2F p) {
+    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    if (confirmDelete_) {
+        const ConfirmLayout c = LayoutConfirm(Size(), false);
+        if (inside(c.yes)) DeleteRide();
+        else if (inside(c.no)) confirmDelete_ = false, Redraw();
+        return;
+    }
+    const HistoryLayout l = LayoutHistory(Size());
+    if (inside(l.back)) return CloseHistory();
+    if (inside(l.file)) return ShowRideFile();
+    if (inside(l.remove)) return AskToDelete();
+    for (size_t i = 0; i < l.rowsShown; ++i)
+        if (inside(l.rows[i]) && pickTop_ + i < history_.size()) return Pick(pickTop_ + static_cast<int>(i));
+}
+
 // The ride log as a FIT file next to it, which COROS, Garmin Connect, Strava and others import.
 void App::SaveFit() {
     donePath_.clear();
@@ -548,9 +756,7 @@ void App::SaveFit() {
 
 // Shows the ride's FIT file in File Explorer, ready to drag into an upload page.
 void App::ShowFile() const {
-    if (donePath_.empty()) return;
-    const std::wstring args = L"/select,\"" + donePath_ + L"\"";
-    ShellExecuteW(hwnd_, nullptr, L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+    if (!donePath_.empty()) Reveal(hwnd_, donePath_);
 }
 
 void App::OnSummaryClick(D2D1_POINT_2F p) {
@@ -711,8 +917,7 @@ void App::OnDevicesKey(WPARAM key) {
         if (radio_ == ble::Bluetooth::State::Off || radio_ == ble::Bluetooth::State::Missing) bluetooth_->TurnOn();
         else Act();
         break;
-    case VK_ESCAPE:
-    case 'D': ShowCourse(); break;
+    case VK_ESCAPE: ShowCourse(); break;
     }
 }
 
@@ -742,21 +947,19 @@ void App::OnKey(WPARAM key) {
     if (key == VK_F11) return ToggleFullscreen();
     if (done_) {
         if (key == VK_RETURN || key == VK_ESCAPE || key == VK_SPACE) CloseSummary();
-        else if (key == 'F') ShowFile();
         return;
     }
+    if (!ride_ && historyOpen_) return OnHistoryKey(key);
     if (!ride_ && devices_) {
         autoContinue_ = false;
         return OnDevicesKey(key);
     }
     if (!ride_) {
         switch (key) {
-        case 'D': ShowDevices(); break;
         case VK_UP: Select(-1); break;
         case VK_DOWN: Select(+1); break;
         case VK_LEFT:
         case VK_RIGHT: Change(Fields()[selected_], key == VK_RIGHT ? 1 : -1); break;
-        case 'R': Reroll(); break;
         case VK_RETURN: Start(); break;
         case VK_ESCAPE:
             if (fullscreen_) ToggleFullscreen();
@@ -772,22 +975,16 @@ void App::OnKey(WPARAM key) {
         return;
     }
 
-    // Up and right are harder, down and left easier. Shift and Page Up/Down take big steps.
+    // Up and right are harder, down and left easier. Page Up/Down take big steps.
     Ride& r = *ride_;
-    const bool big = GetKeyState(VK_SHIFT) < 0;
     switch (key) {
     case VK_UP:
-    case VK_RIGHT: r.Adjust(+1, big); break;
+    case VK_RIGHT: r.Adjust(+1, false); break;
     case VK_DOWN:
-    case VK_LEFT: r.Adjust(-1, big); break;
+    case VK_LEFT: r.Adjust(-1, false); break;
     case VK_PRIOR: r.Adjust(+1, true); break;
     case VK_NEXT: r.Adjust(-1, true); break;
-    case VK_SPACE:
-    case 'P': r.TogglePause(); break;
-    case 'M': r.NextMode(); break;
-    case 'R':
-        if (r.distance() < kRerollBeforeM || r.finished()) NewRide();
-        return;
+    case VK_SPACE: r.TogglePause(); break;
     case VK_RETURN:
         if (r.finished()) EndRide();
         return;
@@ -810,13 +1007,17 @@ void App::OnClick(D2D1_POINT_2F p) {
                 return Redraw();
             }
             // The arrows over and under the ERG target's digits step it by 100, 10 or 1 W.
-            if (ride_->mode() != Mode::Erg) return;
-            for (int i = 0, step = 100; i < 3; ++i, step /= 10) {
+            for (int i = 0, step = 100; i < 3 && ride_->mode() == Mode::Erg; ++i, step /= 10) {
                 const int dir = inside(l.up[i]) ? 1 : inside(l.down[i]) ? -1 : 0;
                 if (!dir) continue;
                 ride_->SetErgW(ride_->ergW() + dir * step);
                 trainer_->SetTarget(ride_->Target());
-                Redraw();
+                return Redraw();
+            }
+            // A card or graph can be dragged onto another to swap the two.
+            if (const int slot = l.Hit(p); slot >= 0) {
+                drag_ = {slot, p, p};
+                SetCapture(hwnd_);
             }
             return;
         }
@@ -826,6 +1027,7 @@ void App::OnClick(D2D1_POINT_2F p) {
         return;
     }
     if (done_) return OnSummaryClick(p);
+    if (historyOpen_) return OnHistoryClick(p);
     if (devices_) {
         autoContinue_ = false;
         return OnDevicesClick(p);
@@ -835,6 +1037,7 @@ void App::OnClick(D2D1_POINT_2F p) {
     if (inside(l.start)) return Start();
     if (inside(l.reroll)) return Reroll();
     if (inside(l.devices)) return ShowDevices();
+    if (inside(l.history)) return ShowHistory();
     for (size_t i = 0; i < fields.size() && i < SetupLayout::kMaxRows; ++i) {
         if (!inside(l.rows[i])) continue;
         selected_ = static_cast<int>(i);
@@ -851,6 +1054,30 @@ void App::OnClick(D2D1_POINT_2F p) {
     }
 }
 
+void App::OnDrag(D2D1_POINT_2F p) {
+    drag_.at = p;
+    // It lifts once the mouse has moved a little, so a plain click doesn't light anything up.
+    if (!drag_.lifted && std::hypot(p.x - drag_.start.x, p.y - drag_.start.y) < 6.0f) return;
+    drag_.lifted = true;
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    Redraw();
+}
+
+// Lets go of a dragged card or graph, swapping it with the one it's over.
+void App::Drop(D2D1_POINT_2F p) {
+    const RideDrag drag = std::exchange(drag_, {});
+    if (!drag.lifted) return;
+    if (ride_ && !confirmEnd_) {
+        const int to = LayoutRide(Size(), ride_->mode() == Mode::Erg).Hit(p);
+        if (to >= 0 && to != drag.from && RideLayout::Swappable(drag.from, to)) {
+            std::swap(board_.slots[drag.from], board_.slots[to]);
+            settings_.board = board_.Format();
+            SaveSettings(settings_);
+        }
+    }
+    Redraw();
+}
+
 void App::OnWheel(D2D1_POINT_2F p, int dir) {
     if (ride_) {
         ride_->Adjust(dir, false);
@@ -858,7 +1085,8 @@ void App::OnWheel(D2D1_POINT_2F p, int dir) {
         Redraw();
         return;
     }
-    if (devices_ || done_) return;
+    if (historyOpen_ && !confirmDelete_) return Pick(pick_ - dir);
+    if (devices_ || done_ || historyOpen_) return;
     const std::vector<Field> fields = Fields();
     const SetupLayout l = LayoutSetup(Size(), fields.size());
     for (size_t i = 0; i < fields.size() && i < SetupLayout::kMaxRows; ++i) {
@@ -888,6 +1116,20 @@ void App::OnButtons(uint32_t pressed) {
         else if (down & (b::kA | b::kB)) CloseSummary();
         return;
     }
+    // On the history screen the D-pad and shifters move, Y shows the file, Z deletes and A or B goes back.
+    if (!ride_ && historyOpen_) {
+        if (confirmDelete_) {
+            if (down & b::kA) DeleteRide();
+            else if (down & b::kB) confirmDelete_ = false, Redraw();
+            return;
+        }
+        if (down & (b::kUp | b::kLeft | b::kShiftUpLeft | b::kShiftDownLeft)) Pick(pick_ - 1);
+        if (down & (b::kDown | b::kRight | b::kShiftUpRight | b::kShiftDownRight)) Pick(pick_ + 1);
+        if (down & b::kY) ShowRideFile();
+        if (down & b::kZ) AskToDelete();
+        if (down & (b::kA | b::kB)) CloseHistory();
+        return;
+    }
     if (!ride_ && devices_) {
         if (!down) return;
         autoContinue_ = false;
@@ -912,6 +1154,7 @@ void App::OnButtons(uint32_t pressed) {
         if (down & b::kY) Reroll();
         if (down & b::kA) Start();
         if (down & b::kB) ShowDevices();
+        if (down & b::kZ) ShowHistory();
         return;
     }
     if (ride_->finished()) {
@@ -1016,7 +1259,7 @@ void App::Paint() {
         DeviceInfo devices[ble::kRoleCount];
         for (size_t i = 0; i < ble::kRoleCount; ++i) devices[i] = Device(static_cast<ble::Role>(i));
         if (ride_) {
-            renderer_->Draw(target_.get(), *ride_, Status(), confirmEnd_);
+            renderer_->Draw(target_.get(), *ride_, board_, Status(), confirmEnd_, &drag_);
         } else if (done_) {
             SummaryView view;
             view.ride = done_.get();
@@ -1029,6 +1272,15 @@ void App::Paint() {
                 view.file = L"Show file";
             }
             renderer_->DrawSummary(target_.get(), view);
+        } else if (historyOpen_) {
+            HistoryView view;
+            view.rides = history_;
+            view.selected = static_cast<size_t>(pick_);
+            view.first = static_cast<size_t>(pickTop_);
+            view.samples = samples_;
+            if (!route_.elevation.empty()) view.route = &route_;
+            view.confirmDelete = confirmDelete_;
+            renderer_->DrawHistory(target_.get(), view);
         } else if (devices_) {
             std::vector<NearbyRow> nearby;
             for (const auto& d : nearby_)
@@ -1072,6 +1324,7 @@ void App::Paint() {
             view.course = &course_;
             view.stats = stats_;
             view.devices = devices;
+            view.history = history_;
             renderer_->DrawSetup(target_.get(), view);
         }
         if (target_->EndDraw() == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) target_ = nullptr;

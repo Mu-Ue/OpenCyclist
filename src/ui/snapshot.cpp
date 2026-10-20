@@ -31,7 +31,7 @@ bool SaveSnapshot(const Ride& ride, std::wstring_view status, const std::wstring
 
         Renderer renderer(dwrite.get());
         target->BeginDraw();
-        renderer.Draw(target.get(), ride, status);
+        renderer.Draw(target.get(), ride, Board{}, status);
         winrt::check_hresult(target->EndDraw());
 
         winrt::com_ptr<IWICStream> stream;
