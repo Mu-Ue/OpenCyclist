@@ -26,7 +26,12 @@ Every ride is saved as a FIT file in `%APPDATA%\OpenCyclist\rides`. Import it in
 | | B | Devices, from the setup screen |
 | Esc | B | End the ride, after a yes |
 | | Y | Show the ride file, on the summary |
+| H | Z | History, from the setup screen |
+| Delete | Z | Delete a ride, on the history screen, after a yes |
+| | Y | Show the ride file, on the history screen |
 | F11 | | Full screen |
+
+During a ride, drag a card or graph onto another to swap them. The arrangement is remembered.
 
 ## Build from source
 

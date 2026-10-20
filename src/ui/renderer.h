@@ -14,6 +14,11 @@
 #include "sim/fit.h"
 #include "sim/ride.h"
 
+// Whether p is inside r, for mouse hits. The right and bottom edges belong to the next box.
+inline bool Contains(const D2D1_RECT_F& r, D2D1_POINT_2F p) {
+    return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
+}
+
 // How a device is doing, which sets its color.
 enum class Tone { Good, Waiting, Problem };
 

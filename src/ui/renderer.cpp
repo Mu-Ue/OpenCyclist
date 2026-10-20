@@ -193,10 +193,8 @@ RideLayout LayoutRide(D2D1_SIZE_F size, bool erg) {
 }
 
 int RideLayout::Hit(D2D1_POINT_2F p) const {
-    for (int i = 0; i < kSlots; ++i) {
-        const D2D1_RECT_F r = Slot(i);
-        if (p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom) return i;
-    }
+    for (int i = 0; i < kSlots; ++i)
+        if (Contains(Slot(i), p)) return i;
     return -1;
 }
 
@@ -1036,14 +1034,10 @@ void Renderer::DrawProfile(ID2D1RenderTarget* target, const Course& course, doub
     } else {
         // A whole course stays put while the rider moves along it, so its shapes are kept for the next frame.
         ProfileCache* hit = nullptr;
-        for (ProfileCache& c : cache_) {
-            const CourseParams& p = c.params;
-            const CourseParams& q = course.params;
-            if (c.fill && p.km == q.km && p.gainM == q.gainM && p.maxGradePct == q.maxGradePct && p.loop == q.loop &&
-                p.seed == q.seed && p.endless == q.endless && p.terrain == q.terrain && c.samples == columns && c.from == from && c.to == to && c.width == width &&
-                c.height == height)
+        for (ProfileCache& c : cache_)
+            if (c.fill && c.params == course.params && c.samples == columns && c.from == from && c.to == to &&
+                c.width == width && c.height == height)
                 hit = &c;
-        }
         if (!hit) {
             hit = &cache_[nextCache_];
             nextCache_ = (nextCache_ + 1) % static_cast<int>(std::size(cache_));

@@ -290,7 +290,7 @@ LRESULT CALLBACK App::Proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 LRESULT App::Handle(UINT msg, WPARAM wParam, LPARAM lParam) {
     // After shutting down for a Windows sign-out, Bluetooth messages may still be queued.
-    if (closed_ && msg >= WM_APP && msg <= ble::WM_NEARBY_CHANGED) return 0;
+    if (closed_ && msg >= WM_APP && msg <= ble::WM_BLE_LAST) return 0;
     switch (msg) {
     case WM_TIMER:
         if (wParam == kRepeatTimer) {
@@ -727,7 +727,7 @@ void App::OnHistoryKey(WPARAM key) {
 }
 
 void App::OnHistoryClick(D2D1_POINT_2F p) {
-    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    auto inside = [&](const D2D1_RECT_F& r) { return Contains(r, p); };
     if (confirmDelete_) {
         const ConfirmLayout c = LayoutConfirm(Size(), false);
         if (inside(c.yes)) DeleteRide();
@@ -761,7 +761,7 @@ void App::ShowFile() const {
 
 void App::OnSummaryClick(D2D1_POINT_2F p) {
     const SummaryLayout l = LayoutSummary(Size());
-    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    auto inside = [&](const D2D1_RECT_F& r) { return Contains(r, p); };
     if (inside(l.done)) CloseSummary();
     else if (inside(l.file)) ShowFile();
 }
@@ -923,7 +923,7 @@ void App::OnDevicesKey(WPARAM key) {
 
 void App::OnDevicesClick(D2D1_POINT_2F p) {
     const DevicesLayout l = LayoutDevices(Size(), nearby_.size());
-    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    auto inside = [&](const D2D1_RECT_F& r) { return Contains(r, p); };
     if (inside(l.next)) return ShowCourse();
     if ((radio_ == ble::Bluetooth::State::Off || radio_ == ble::Bluetooth::State::Missing) && inside(l.action))
         return bluetooth_->TurnOn();
@@ -961,6 +961,7 @@ void App::OnKey(WPARAM key) {
         case VK_LEFT:
         case VK_RIGHT: Change(Fields()[selected_], key == VK_RIGHT ? 1 : -1); break;
         case VK_RETURN: Start(); break;
+        case 'H': ShowHistory(); break;
         case VK_ESCAPE:
             if (fullscreen_) ToggleFullscreen();
             break;
@@ -996,7 +997,7 @@ void App::OnKey(WPARAM key) {
 }
 
 void App::OnClick(D2D1_POINT_2F p) {
-    auto inside = [&](const D2D1_RECT_F& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    auto inside = [&](const D2D1_RECT_F& r) { return Contains(r, p); };
     if (ride_) {
         if (!confirmEnd_) {
             const RideLayout l = LayoutRide(Size(), ride_->mode() == Mode::Erg);
@@ -1090,8 +1091,7 @@ void App::OnWheel(D2D1_POINT_2F p, int dir) {
     const std::vector<Field> fields = Fields();
     const SetupLayout l = LayoutSetup(Size(), fields.size());
     for (size_t i = 0; i < fields.size() && i < SetupLayout::kMaxRows; ++i) {
-        const D2D1_RECT_F& r = l.rows[i];
-        if (p.x < r.left || p.x >= r.right || p.y < r.top || p.y >= r.bottom) continue;
+        if (!Contains(l.rows[i], p)) continue;
         selected_ = static_cast<int>(i);
         Change(fields[i], dir);
         return;
@@ -1417,7 +1417,10 @@ void App::Shutdown() {
     StopRepeat();
     timer_ = false;
     CloseLog();
-    // Release the trainer before the window goes, so it isn't left holding a power target.
+    // Release the trainer before the window goes, so it isn't left holding a power target. All the links are told
+    // first, so they wind down together rather than one after another.
+    for (ble::Link* link : std::initializer_list<ble::Link*>{trainer_.get(), controllers_.get(), monitor_.get()})
+        if (link) link->RequestStop();
     trainer_.reset();
     controllers_.reset();
     monitor_.reset();

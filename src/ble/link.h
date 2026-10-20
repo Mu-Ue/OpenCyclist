@@ -24,6 +24,9 @@ public:
     void Use(uint64_t address, std::wstring name);
     std::wstring Name() const;
     uint64_t Address() const;  // can change when the device turns up at a new one
+    // Tells the session to end without waiting for it, so several links can wind down at once before they are
+    // destroyed.
+    void RequestStop();
 
 protected:
     using Matcher = bool (*)(const adv::BluetoothLEAdvertisement&);

@@ -44,3 +44,5 @@ target_link_options(OpenCyclist PRIVATE /GUARD:CF /GUARD:EHCONT /CETCOMPAT /DEPE
 
 add_executable(sim_test test/sim_test.cpp)
 target_link_libraries(sim_test PRIVATE sim)
+enable_testing()
+add_test(NAME sim_test COMMAND sim_test)

@@ -11,6 +11,8 @@ struct CourseParams {
     uint32_t seed = 0;
     bool endless = false;  // grows as it's ridden, ignoring km and gainM
     int terrain = 1;       // for endless: 0 flat, 1 rolling, 2 hilly, 3 mountains
+
+    bool operator==(const CourseParams&) const = default;
 };
 
 constexpr int kTerrainCount = 4;

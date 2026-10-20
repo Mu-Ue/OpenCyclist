@@ -8,13 +8,15 @@ namespace bt = winrt::Windows::Devices::Bluetooth;
 Link::Link(HWND window, Role role, Matcher matches, bool lowLatency, uint64_t address, std::wstring name)
     : window_(window), role_(role), matches_(matches), lowLatency_(lowLatency), address_(address), name_(std::move(name)) {}
 
+void Link::RequestStop() {
+    std::lock_guard lock(mutex_);
+    stop_ = true;
+    SetEvent(wake_.get());
+    SetEvent(nudge_.get());
+}
+
 void Link::Stop() {
-    {
-        std::lock_guard lock(mutex_);
-        stop_ = true;
-        SetEvent(wake_.get());
-        SetEvent(nudge_.get());
-    }
+    RequestStop();
     WaitForSingleObject(done_.get(), 5000);
 }
 
