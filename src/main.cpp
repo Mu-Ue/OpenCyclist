@@ -67,6 +67,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
         return 0;
     }
-    SaveSettings(settings);  // arguments stick for the next start, except the seed, which isn't saved
+    if (__argc > 1) SaveSettings(settings);  // arguments stick for the next start, except the seed, which isn't saved
     return RunApp(instance, std::move(settings));
 }

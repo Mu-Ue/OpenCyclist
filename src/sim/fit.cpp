@@ -1,6 +1,7 @@
 #include "sim/fit.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -98,14 +99,27 @@ bool ParseLog(std::string_view csv, long long& start, CourseParams& course, std:
     for (size_t line = header + 1; line < csv.size();) {
         size_t end = csv.find('\n', line);
         if (end == std::string_view::npos) end = csv.size();
-        const std::string row(csv.substr(line, end - line));
+        const char* p = csv.data() + line;
+        const char* const rowEnd = csv.data() + end;
         line = end + 1;
+        // A number and the comma after it. The last field may be followed by anything, such as a '\r'.
+        auto field = [&](auto& v, bool last = false) {
+            const auto [q, ec] = std::from_chars(p, rowEnd, v);
+            if (ec != std::errc{} || (!last && (q == rowEnd || *q != ','))) return false;
+            p = q + 1;
+            return true;
+        };
+        // The mode, 1 to 15 characters up to a comma.
+        auto mode = [&] {
+            const char* comma = std::find(p, rowEnd, ',');
+            if (comma == p || comma == rowEnd || comma - p > 15) return false;
+            p = comma + 1;
+            return true;
+        };
         double time, distance, elevation, grade, cadence, speed;
-        int power, heartRate;
-        char mode[16];
-        int gear, target;
-        if (sscanf_s(row.c_str(), "%lf,%lf,%lf,%lf,%d,%lf,%lf,%15[^,],%d,%d,%d", &time, &distance, &elevation, &grade,
-                        &power, &cadence, &speed, mode, static_cast<unsigned>(sizeof(mode)), &gear, &target, &heartRate) == 11)
+        int power, heartRate, gear, target;
+        if (field(time) && field(distance) && field(elevation) && field(grade) && field(power) && field(cadence) &&
+            field(speed) && mode() && field(gear) && field(target) && field(heartRate, true))
             samples.push_back({distance, elevation, speed, std::clamp(power, 0, 65534), std::clamp(static_cast<int>(cadence), 0, 254),
                                std::clamp(heartRate, 0, 254)});
     }

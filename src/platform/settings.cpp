@@ -48,20 +48,27 @@ double ReadNumber(const std::wstring& ini, const wchar_t* key, double lo, double
     return ParseNumber(buf, lo, hi, v) ? v : fallback;
 }
 
-void WriteNumber(const std::wstring& ini, const wchar_t* key, double value) {
+// Adds "key=value" to a section being built, each ended by a null.
+void Put(std::wstring& section, const wchar_t* key, std::wstring_view value) {
+    section.append(key).append(1, L'=').append(value).append(1, L'\0');
+}
+
+void PutNumber(std::wstring& section, const wchar_t* key, double value) {
     wchar_t buf[64];
     swprintf_s(buf, L"%g", value);
-    WritePrivateProfileStringW(kSection, key, buf, ini.c_str());
+    Put(section, key, buf);
 }
 
 }  // namespace
 
 std::wstring AppDataDir() {
-    PWSTR base = nullptr;
-    std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &base))) dir = base;
-    CoTaskMemFree(base);
-    dir += L"\\OpenCyclist";
+    static const std::wstring dir = [] {
+        PWSTR base = nullptr;
+        std::wstring path;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &base))) path = base;
+        CoTaskMemFree(base);
+        return path + L"\\OpenCyclist";
+    }();
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }
@@ -98,24 +105,27 @@ Settings LoadSettings() {
     return s;
 }
 
+// The whole section in one write, rather than rewriting the file once for each key.
 void SaveSettings(const Settings& s) {
-    const std::wstring ini = IniPath();
-    WriteNumber(ini, L"km", s.course.km);
-    WriteNumber(ini, L"gain", s.course.gainM);
-    WriteNumber(ini, L"max_grade", s.course.maxGradePct);
-    WriteNumber(ini, L"loop", s.course.loop ? 1 : 0);
-    WriteNumber(ini, L"endless", s.course.endless ? 1 : 0);
-    WriteNumber(ini, L"terrain", s.course.terrain);
-    WriteNumber(ini, L"rider_kg", s.riderKg);
-    WriteNumber(ini, L"erg_w", s.ergW);
-    WritePrivateProfileStringW(kSection, L"mode", ModeName(s.mode), ini.c_str());
-    if (!s.board.empty()) WritePrivateProfileStringW(kSection, L"board", s.board.c_str(), ini.c_str());
+    std::wstring section;
+    PutNumber(section, L"km", s.course.km);
+    PutNumber(section, L"gain", s.course.gainM);
+    PutNumber(section, L"max_grade", s.course.maxGradePct);
+    PutNumber(section, L"loop", s.course.loop ? 1 : 0);
+    PutNumber(section, L"endless", s.course.endless ? 1 : 0);
+    PutNumber(section, L"terrain", s.course.terrain);
+    PutNumber(section, L"rider_kg", s.riderKg);
+    PutNumber(section, L"erg_w", s.ergW);
+    Put(section, L"mode", ModeName(s.mode));
+    if (!s.board.empty()) Put(section, L"board", s.board);
     for (size_t i = 0; i < std::size(kDeviceKeys); ++i) {
         wchar_t buf[32];
         swprintf_s(buf, L"%llX", static_cast<unsigned long long>(s.devices[i].address));
-        WritePrivateProfileStringW(kSection, kDeviceKeys[i][0], buf, ini.c_str());
-        WritePrivateProfileStringW(kSection, kDeviceKeys[i][1], s.devices[i].name.c_str(), ini.c_str());
+        Put(section, kDeviceKeys[i][0], buf);
+        Put(section, kDeviceKeys[i][1], s.devices[i].name);
     }
+    section += L'\0';  // the list ends with an empty line
+    WritePrivateProfileSectionW(kSection, section.c_str(), IniPath().c_str());
 }
 
 bool ApplyArgs(Settings& s, const wchar_t* commandLine, std::wstring& error) {

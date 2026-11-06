@@ -10,8 +10,8 @@ namespace {
 
 // Gravity and rolling resistance, which don't depend on speed.
 double SlopeForce(double grade, double mass) {
-    const double theta = std::atan(grade);
-    return mass * kGravity * (std::sin(theta) + kCrr * std::cos(theta));
+    // sin and cos of atan(grade), without the trigonometry.
+    return mass * kGravity * (grade + kCrr) / std::sqrt(1.0 + grade * grade);
 }
 
 double DragForce(double v) { return 0.5 * kAirDensity * kCdA * v * v; }

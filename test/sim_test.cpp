@@ -132,6 +132,19 @@ int main() {
         ReadLog("time_s\n", logged, rows))
         ++failures, std::printf("FAIL log totals\n");
 
+    // Rows that aren't whole are skipped, and a Windows line ending doesn't spoil one.
+    const bool parsed = ReadLog(std::string(log) +
+                                    "2,10.0,100.5,0.0,1000,91,18.0,erg,10,200,141\r\n"
+                                    "3,15.0,100.5,0.0,1000,91,18.0,erg,10,200\n"           // a column short
+                                    "4,20.0,100.5,0.0,1000,91,18.0,,10,200,141\n"          // no mode
+                                    "5,25.0,100.5,0.0,1000,91,18.0,sixteen_letters_,10,200,141\n"  // mode too long
+                                    "6,30.0,100.5,0.0,10x0,91,18.0,erg,10,200,141\n"       // junk in a number
+                                    "7,35.0,100.5,-1.5,1000,91.6,18.0,sim,10,200,141",     // no line ending
+                                 logged, rows);
+    if (!parsed || rows.size() != 3 || rows[1].distance != 10.0 || rows[1].heartRate != 141 || rows[2].distance != 35.0 ||
+        rows[2].cadence != 91 || rows[2].power != 1000)
+        ++failures, std::printf("FAIL log rows, %zu read\n", rows.size());
+
     // A logged ride's course is made again from its settings, unless its heights say it was another road.
     for (const bool endless : {false, true}) {
         const CourseParams p{.km = 5, .gainM = 100, .seed = 7, .endless = endless, .terrain = 2};

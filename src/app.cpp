@@ -47,6 +47,16 @@ std::wstring CourseText(const CourseParams& c) {
     return buf;
 }
 
+// A whole file in one read, or empty when it can't be read.
+std::string ReadAll(const std::wstring& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) return {};
+    std::string data(static_cast<size_t>(in.tellg()), '\0');
+    in.seekg(0).read(data.data(), static_cast<std::streamsize>(data.size()));
+    data.resize(static_cast<size_t>(in.gcount()));
+    return data;
+}
+
 // Shows a file in File Explorer, selected, ready to drag into an upload page.
 void Reveal(HWND hwnd, const std::wstring& path) {
     const std::wstring args = L"/select,\"" + path + L"\"";
@@ -254,11 +264,9 @@ int App::Run(HINSTANCE instance) {
     const BOOL dark = TRUE;  // a dark title bar to match; ignored before Windows 10 20H1
     DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
-    if (!settings_.course.seed) settings_.course.seed = RandomSeed();
-    MakeCourse();
-    LoadHistory(false);
     // Start on the devices screen. Remembered devices connect by themselves, and once they all have, the
-    // course screen follows. The window shows first, so Bluetooth starting up doesn't hold up the first frame.
+    // course screen follows. The window shows first, so Bluetooth starting up, the course and the history don't
+    // hold up the first frame.
     devices_ = true;
     ShowWindow(hwnd_, SW_SHOWDEFAULT);
     UpdateWindow(hwnd_);
@@ -268,6 +276,9 @@ int App::Run(HINSTANCE instance) {
     monitor_ = std::make_unique<ble::HeartRateMonitor>(hwnd_, saved[2].address, saved[2].name);
     bluetooth_ = std::make_unique<ble::Bluetooth>(hwnd_);
     ShowDevices();
+    if (!settings_.course.seed) settings_.course.seed = RandomSeed();
+    MakeCourse();
+    LoadHistory(false);
     autoContinue_ = std::any_of(saved, saved + ble::kRoleCount, [](const SavedDevice& d) { return d.address != 0; });
     lastTick_ = GetTickCount64();
     UpdateTimer();
@@ -528,8 +539,8 @@ void App::Start() {
     SaveSettings(settings_);
     // An endless road is new every ride. The setup screen only shows what its terrain is like.
     if (settings_.course.endless) settings_.course.seed = RandomSeed();
-    const Course course = settings_.course.endless ? GenerateCourse(settings_.course) : course_;
-    ride_ = std::make_unique<Ride>(course, settings_.mode, settings_.riderKg + kBikeKg, settings_.ergW);
+    ride_ = std::make_unique<Ride>(settings_.course.endless ? GenerateCourse(settings_.course) : course_, settings_.mode,
+                                   settings_.riderKg + kBikeKg, settings_.ergW);
     ride_->OnPower(power_);
     ride_->OnCadence(cadence_);
     ride_->OnHeartRate(Saved(ble::Role::HeartRate).address ? bpm_ : -1);
@@ -615,8 +626,7 @@ void App::LoadHistory(bool all) {
         if (swscanf_s(name.c_str(), L"%4hu-%2hu-%2hu_%2hu%2hu%2hu", &st.wYear, &st.wMonth, &st.wDay, &st.wHour,
                       &st.wMinute, &st.wSecond) != 6)
             continue;
-        std::ifstream in(dir + L"\\" + name, std::ios::binary);
-        if (!ReadLog(std::string(std::istreambuf_iterator<char>(in), {}), course, samples) || samples.empty()) continue;
+        if (!ReadLog(ReadAll(dir + L"\\" + name), course, samples) || samples.empty()) continue;
         // The year only for rides from another year.
         wchar_t date[64] = L"", time[32] = L"";
         GetDateFormatEx(L"en-US", 0, &st, st.wYear == now.wYear ? L"ddd d MMM" : L"ddd d MMM yyyy", date,
@@ -664,9 +674,8 @@ void App::LoadSamples() {
     const PastRide& ride = history_[pick_];
     if (ride.name == samplesOf_) return;
     samplesOf_ = ride.name;
-    std::ifstream in(RidePath(ride, L".csv"), std::ios::binary);
     CourseParams course;
-    if (!ReadLog(std::string(std::istreambuf_iterator<char>(in), {}), course, samples_)) samples_.clear();
+    if (!ReadLog(ReadAll(RidePath(ride, L".csv")), course, samples_)) samples_.clear();
     route_ = samples_.empty() ? Course{} : LoggedCourse(course, samples_);
 }
 
@@ -746,8 +755,7 @@ void App::OnHistoryClick(D2D1_POINT_2F p) {
 void App::SaveFit() {
     donePath_.clear();
     if (logPath_.empty()) return;
-    std::ifstream in(logPath_, std::ios::binary);
-    const std::string fit = RideToFit(std::string(std::istreambuf_iterator<char>(in), {}));
+    const std::string fit = RideToFit(ReadAll(logPath_));
     if (fit.empty()) return;
     std::wstring path = logPath_.substr(0, logPath_.rfind(L'.')) + L".fit";
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -1256,8 +1264,10 @@ void App::Paint() {
                 props, D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right, rc.bottom)), target_.put()));
         }
         target_->BeginDraw();
+        // Only the devices and setup screens show the devices.
         DeviceInfo devices[ble::kRoleCount];
-        for (size_t i = 0; i < ble::kRoleCount; ++i) devices[i] = Device(static_cast<ble::Role>(i));
+        if (!ride_ && !done_ && !historyOpen_)
+            for (size_t i = 0; i < ble::kRoleCount; ++i) devices[i] = Device(static_cast<ble::Role>(i));
         if (ride_) {
             renderer_->Draw(target_.get(), *ride_, board_, Status(), confirmEnd_, &drag_);
         } else if (done_) {
